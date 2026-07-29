@@ -1,0 +1,11 @@
+{
+  "name": "leeward",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A first-person sailing game: real apparent-wind physics on a shader-built sea.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs"
+  }
+}
