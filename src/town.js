@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { terrainHeight, TOWN_CENTER, findShore, ISLAND } from './terrain.js';
 import { applyAtmosphere } from './materials.js';
 import { mergeGeometries, prepare, makeRng, clamp } from './utils.js';
+import { PROP_LAYER } from './layers.js';
 
 /**
  * A whitewashed fishing town terraced up the hillside above the bay, a stone
@@ -228,6 +229,7 @@ function makeTrees(group, atmosphere) {
     im.castShadow = true;
     im.receiveShadow = true;
     im.instanceMatrix.needsUpdate = true;
+    im.layers.set(PROP_LAYER);
     group.add(im);
   };
   add(cypressGeo, cypressMat, cyp);
@@ -278,6 +280,7 @@ function makeRocks(group, atmosphere) {
     buckets[i].forEach((m, k) => im.setMatrixAt(k, m));
     im.castShadow = true;
     im.receiveShadow = true;
+    im.layers.set(PROP_LAYER);
     group.add(im);
   });
 }
@@ -297,6 +300,7 @@ export function makeBirds(scene) {
   for (let i = 0; i < 14; i++) {
     const m = new THREE.Mesh(g, mat);
     m.scale.setScalar(0.9 + r() * 0.5);
+    m.layers.set(PROP_LAYER);
     group.add(m);
     birds.push({
       mesh: m,

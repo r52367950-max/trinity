@@ -347,12 +347,14 @@ export class Sky {
     this.sunLight.shadow.bias = -0.0006;
     this.sunLight.shadow.normalBias = 0.6;
     const sc = this.sunLight.shadow.camera;
-    sc.near = 1; sc.far = 1400; sc.left = -420; sc.right = 420; sc.top = 420; sc.bottom = -420;
+    sc.near = 1; sc.far = 1400; sc.left = -300; sc.right = 300; sc.top = 300; sc.bottom = -300;
 
     this.ambient = new THREE.HemisphereLight(0x9fc4e8, 0x2a3a44, 0.55);
 
     this.needsUpdate = true;
     this._cubeTimer = 0;
+    // the cube feeds ambient light only, and drifting cloud barely moves it
+    this.envInterval = 6.0;
   }
 
   /** azimuth: radians clockwise from north. elevation: radians above horizon. */
@@ -372,6 +374,15 @@ export class Sky {
     this.sunLight.intensity = 3.1 * Math.max(0.0, Math.min(1, (e + 0.02) / 0.22));
     this.ambient.intensity = 0.22 + 0.30 * t;
     this.needsUpdate = true;
+  }
+
+  setShadowSize(n) {
+    if (this.sunLight.shadow.mapSize.x === n) return;
+    this.sunLight.shadow.mapSize.set(n, n);
+    if (this.sunLight.shadow.map) {
+      this.sunLight.shadow.map.dispose();
+      this.sunLight.shadow.map = null;
+    }
   }
 
   /** Anchor the shadow frustum over a point of interest. */
@@ -395,7 +406,7 @@ export class Sky {
     // the cube map only feeds ambient light and rough reflections, so it can
     // lag the drifting clouds by a few frames without anyone noticing
     this._cubeTimer += dt;
-    if (this._cubeTimer > 0.5) {
+    if (this._cubeTimer > this.envInterval) {
       this._cubeTimer = 0;
       this.cubeCamera.update(renderer, this.cubeScene);
       const next = this.pmrem.fromCubemap(this.cubeRT.texture);

@@ -19,6 +19,7 @@ export class Hud {
       timer: document.getElementById('timer'),
       help: document.getElementById('help'),
       toast: document.getElementById('toast'),
+      fps: document.getElementById('fps'),
     };
     this.canvas = document.getElementById('dial');
     this.ctx = this.canvas.getContext('2d');

@@ -20,7 +20,7 @@ import { SKY_SAMPLE_GLSL, CLOUD_GLSL } from './atmosphere.js';
 
 const RINGS = 224;
 const SEGMENTS = 288;
-const R_MAX = 14000;
+const R_MAX = 9500;
 const R_NEAR = 300;
 
 function buildRadialGrid() {
@@ -78,6 +78,7 @@ export class Ocean {
     });
 
     this.reflectionCamera = new THREE.PerspectiveCamera();
+    this.reflectionCamera.layers.set(0);   // props are excluded, see layers.js
     this.clipPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 1.2);
 
     this.uniforms = {
@@ -118,6 +119,8 @@ export class Ocean {
       uScatterColor: { value: new THREE.Color(0.045, 0.21, 0.235) },
       uDeepColor: { value: new THREE.Color(0.010, 0.046, 0.080) },
       uFoamAmount: { value: 1.0 },
+      uPlanarStrength: { value: 1.0 },
+      uRefractionValid: { value: 1.0 },
       uCloudReflections: { value: 1.0 },
       uDetailStrength: { value: 1.0 },
       uDebug: { value: 0 },
@@ -211,6 +214,7 @@ export class Ocean {
       uniform vec2 uResolution, uWindDir, uWakeCenter;
       uniform float uNear, uFar, uTime, uWindSpeed, uWakeRegion;
       uniform float uFoamAmount, uCloudReflections, uDetailStrength;
+      uniform float uPlanarStrength, uRefractionValid;
       uniform float uDebug;
       uniform vec3 uExtinction;
       uniform vec3 uScatterColor, uDeepColor;
@@ -289,28 +293,37 @@ export class Ocean {
 
         // ---- refraction and absorption --------------------------------------
         vec2 screenUV = gl_FragCoord.xy / uResolution;
-        float distortScale = 0.42 / (1.0 + viewDist * 0.06);
-        vec2 refrUV = clamp(screenUV + N.xz * distortScale, vec2(0.002), vec2(0.998));
-
-        float sceneZ = linearDepth(texture2D(uDepthTex, refrUV).x);
-        float thickness = sceneZ - vViewDepth;
-        if (thickness < 0.0) {
-          // the offset picked up something in front of the water: fall back
-          refrUV = screenUV;
-          sceneZ = linearDepth(texture2D(uDepthTex, refrUV).x);
-          thickness = max(sceneZ - vViewDepth, 0.0);
-        }
-        thickness = min(thickness, 220.0);
-
-        vec3 bottom = texture2D(uRefraction, refrUV).rgb;
-        vec3 transmit = exp(-uExtinction * thickness);
-        vec3 inscatter = uScatterColor * (1.0 - exp(-thickness * 0.16));
         vec3 sunTint = uSunColor * (0.35 + 0.65 * max(uSunDir.y, 0.0));
         // upwelling light is lit by sun and sky together, which is what keeps
         // water from going black wherever the reflection happens to be dark
         vec3 waterLight = sunTint * uSunIntensity * 0.55 + skyRadiance(vec3(0.0, 1.0, 0.0)) * 0.55;
-        vec3 underwater = bottom * transmit + inscatter * waterLight;
-        underwater = mix(underwater, uDeepColor * waterLight * 1.8, smoothstep(12.0, 60.0, thickness));
+
+        float thickness = 220.0;
+        vec3 bottom = vec3(0.0);
+        vec3 underwater = uDeepColor * waterLight * 1.8;
+
+        // The prepass is skipped entirely in deep water, where the result is
+        // indistinguishable: 30 m of sea absorbs everything below it.
+        if (uRefractionValid > 0.5) {
+          float distortScale = 0.42 / (1.0 + viewDist * 0.06);
+          vec2 refrUV = clamp(screenUV + N.xz * distortScale, vec2(0.002), vec2(0.998));
+
+          float sceneZ = linearDepth(texture2D(uDepthTex, refrUV).x);
+          thickness = sceneZ - vViewDepth;
+          if (thickness < 0.0) {
+            // the offset picked up something in front of the water: fall back
+            refrUV = screenUV;
+            sceneZ = linearDepth(texture2D(uDepthTex, refrUV).x);
+            thickness = max(sceneZ - vViewDepth, 0.0);
+          }
+          thickness = min(thickness, 220.0);
+
+          bottom = texture2D(uRefraction, refrUV).rgb;
+          vec3 transmit = exp(-uExtinction * thickness);
+          vec3 inscatter = uScatterColor * (1.0 - exp(-thickness * 0.16));
+          underwater = bottom * transmit + inscatter * waterLight;
+          underwater = mix(underwater, uDeepColor * waterLight * 1.8, smoothstep(12.0, 60.0, thickness));
+        }
 
         // ---- reflection ------------------------------------------------------
         vec3 R = reflect(-V, N);
@@ -335,7 +348,7 @@ export class Ocean {
         // the mirror is only trustworthy nearby; past that the analytic sky
         // is both cheaper and better looking than a stretched low-res sample
         float valid = planar.a * edge.x * edge.y * step(0.0, vReflUV.w);
-        valid *= 1.0 - smoothstep(260.0, 1100.0, viewDist);
+        valid *= (1.0 - smoothstep(260.0, 1100.0, viewDist)) * uPlanarStrength;
         vec3 reflection = mix(skyRefl, planar.rgb, valid);
 
         // ---- fresnel ---------------------------------------------------------
@@ -410,10 +423,11 @@ export class Ocean {
     `;
   }
 
-  setSize(width, height) {
+  setSize(width, height, auxScale = 0.55) {
     this.uniforms.uResolution.value.set(width, height);
-    const rw = Math.max(256, Math.min(1600, Math.floor(width * 0.65)));
-    const rh = Math.max(256, Math.min(1600, Math.floor(height * 0.65)));
+    const scale = auxScale > 0 ? auxScale : 0.3;
+    const rw = Math.max(160, Math.min(1600, Math.floor(width * scale)));
+    const rh = Math.max(160, Math.min(1600, Math.floor(height * scale)));
     this.reflectionRT.setSize(rw, rh);
     this.refractionRT.setSize(rw, rh);
     this.refractionRT.depthTexture.image.width = rw;
@@ -455,23 +469,32 @@ export class Ocean {
    * objects that must not appear in them (the water itself and the sky dome —
    * the sky is added back analytically, at full resolution, in the shader).
    */
-  renderAuxiliary(renderer, scene, camera, hidden) {
+  renderAuxiliary(renderer, scene, camera, hidden, want = {}) {
+    const doRefl = want.reflection !== false;
+    const doRefr = want.refraction !== false;
+    this.uniforms.uRefractionValid.value = doRefr ? 1 : 0;
+    if (!doRefl && !doRefr) return;
+
     const prevClear = renderer.getClearAlpha();
     const prevShadow = renderer.shadowMap.autoUpdate;
     for (const o of hidden) o.visible = false;
     renderer.setClearAlpha(0);
     renderer.shadowMap.autoUpdate = false;
 
-    this.updateReflectionCamera(camera);
-    renderer.clippingPlanes = [this.clipPlane];
-    renderer.setRenderTarget(this.reflectionRT);
-    renderer.clear();
-    renderer.render(scene, this.reflectionCamera);
+    if (doRefl) {
+      this.updateReflectionCamera(camera);
+      renderer.clippingPlanes = [this.clipPlane];
+      renderer.setRenderTarget(this.reflectionRT);
+      renderer.clear();
+      renderer.render(scene, this.reflectionCamera);
+      renderer.clippingPlanes = [];
+    }
 
-    renderer.clippingPlanes = [];
-    renderer.setRenderTarget(this.refractionRT);
-    renderer.clear();
-    renderer.render(scene, camera);
+    if (doRefr) {
+      renderer.setRenderTarget(this.refractionRT);
+      renderer.clear();
+      renderer.render(scene, camera);
+    }
 
     renderer.setRenderTarget(null);
     renderer.setClearAlpha(prevClear);

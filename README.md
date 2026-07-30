@@ -11,6 +11,8 @@ built from code in about two seconds.
 ```bash
 npm start          # or: node server.mjs
 # open http://localhost:8080
+
+npm run bundle     # -> dist/leeward.html, one self-contained file
 ```
 
 ES modules need a real origin, so the page must be served over HTTP —
@@ -31,8 +33,9 @@ Needs a WebGL2 browser. Click the canvas to capture the mouse.
 | `C` | helm view / chase camera |
 | `[` `]` | move the sun |
 | `-` `=` | wind strength |
-| `H` | hide the key list · `F` fast mode · `R` restart |
-| mouse | look around |
+| `H` | hide the key list · `F` quality tier · `R` restart |
+| mouse | look around (drag if pointer lock is unavailable) |
+| touch | hold bottom-left / bottom-right to steer, drag to look |
 
 Round the five orange marks in order. The clock starts at the first one.
 
@@ -88,6 +91,34 @@ fades a little, and the hull stamps in fresh turbulence — stern churn plus the
 two diverging arms of a Kelvin wake. The trail persists in world space for
 about half a minute.
 
+## Performance
+
+Three quality tiers — high, medium, fast — plus dynamic resolution on top. The
+tuner watches real frame time and gives back pixels first, because that is the
+cheapest thing to give back; only when the resolution hits its floor does the
+tier itself step down. `F` cycles the tiers by hand, and the readout in the
+corner shows tier and render scale. Software rasterisers (SwiftShader,
+llvmpipe) are detected up front and start at the bottom tier, since they will
+never win that fight.
+
+What the tiers actually turn off, in order of what it buys:
+
+- **The refraction prepass is skipped in deep water.** It is a whole extra scene
+  render, and it only changes the image where you can see the bottom — past
+  about 30 m the water has absorbed everything anyway. Out in the bay it simply
+  does not run.
+- **Trees, rocks and gulls are excluded from the reflection pass** via a render
+  layer. They are thousands of instances contributing almost nothing to a
+  wave-distorted mirror.
+- **The shadow map updates every 2–5 frames.** The sun does not move and the
+  town does not walk about; only the boat needs the map to keep up.
+- **The environment cube and its PMREM convolution refresh every 6 seconds**
+  rather than twice a second. Drifting cloud barely moves ambient light.
+- Cloud reflections in the water shader, MSAA sample count, shadow map size and
+  the reflection buffer scale all step down with the tier; at the bottom tier
+  the planar mirror is dropped entirely and the water reflects the analytic sky
+  alone, which still looks like water.
+
 ## Layout
 
 ```
@@ -106,6 +137,8 @@ src/
   materials.js      aerial perspective injected into stock three materials
   noise.js          tiling procedural textures
   hud.js  input.js  utils.js  shared.js
+  layers.js         which objects the reflection pass is allowed to skip
+build.mjs           bundles everything into one self-contained HTML file
 vendor/three/       three.js r180 (MIT), vendored so this runs offline
 ```
 

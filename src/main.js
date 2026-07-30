@@ -3,6 +3,7 @@ import { shared } from './shared.js';
 import { makeWaterNormalTexture, makeFoamTexture, makeNoiseTexture, makeSandTexture } from './noise.js';
 import { Sky } from './atmosphere.js';
 import { Terrain, waterDepthAt, terrainHeight, ISLAND } from './terrain.js';
+import { PROP_LAYER } from './layers.js';
 import { buildTown, makeBirds } from './town.js';
 import { Ocean } from './ocean.js';
 import { Wake } from './wake.js';
@@ -97,7 +98,12 @@ async function boot() {
     post = new Post(renderer);
     hud = new Hud();
     input = new Input(canvas);
-    resize();
+    if (matchMedia('(pointer: coarse)').matches) {
+      input.installTouch(canvas);
+      document.body.classList.add('touch');
+    }
+    camera.layers.enable(PROP_LAYER);   // props are hidden from the mirror pass
+    applyTier(detectTier());
     updateCamera(0.016);
   });
 
@@ -107,7 +113,7 @@ async function boot() {
   playBtn.addEventListener('click', () => {
     gate.classList.add('gone');
     state.paused = false;
-    canvas.requestPointerLock?.();
+    try { const p = canvas.requestPointerLock?.(); if (p && p.catch) p.catch(() => {}); } catch { /* drag to look instead */ }
     setTimeout(() => gate.remove(), 900);
   });
   requestAnimationFrame(loop);
@@ -228,18 +234,127 @@ function updateCamera(dt) {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * Quality tiers. The expensive things here are the two auxiliary scene renders
+ * the water needs and the water's own fragment shader, so that is what the
+ * tiers turn down first.
+ */
+const TIERS = {
+  high:   { name: 'High',   reflScale: 0.55, cloudRefl: 1, msaa: 4, shadow: 2048, shadowEvery: 2, bloom: true,  planar: 1.0, maxScale: 1.00, foam: 1.0 },
+  medium: { name: 'Medium', reflScale: 0.42, cloudRefl: 0, msaa: 2, shadow: 1024, shadowEvery: 3, bloom: true,  planar: 1.0, maxScale: 0.85, foam: 1.0 },
+  low:    { name: 'Fast',   reflScale: 0.00, cloudRefl: 0, msaa: 0, shadow: 1024, shadowEvery: 5, bloom: false, planar: 0.0, maxScale: 0.70, foam: 0.9 },
+};
+const TIER_ORDER = ['high', 'medium', 'low'];
+
+const perf = {
+  tier: 'high',
+  scale: 1.0,          // dynamic resolution multiplier on top of the tier cap
+  basePixelRatio: Math.min(devicePixelRatio || 1, 2),
+  frameMs: 16.7,
+  adjustTimer: 0,
+  autoTiered: false,
+  frames: 0,
+};
+
+/** Software rasterisers never win this fight; do not make them try. */
+function detectTier() {
+  try {
+    const gl = renderer.getContext();
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    const name = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : '';
+    if (/swiftshader|software|llvmpipe|basic render/i.test(name)) return 'low';
+  } catch { /* renderer string is optional */ }
+  return 'high';
+}
+
+function applyTier(name) {
+  perf.tier = name;
+  const t = TIERS[name];
+  ocean.uniforms.uCloudReflections.value = t.cloudRefl;
+  ocean.uniforms.uPlanarStrength.value = t.planar;
+  ocean.uniforms.uFoamAmount.value = t.foam;
+  post.enabled = t.bloom;
+  post.setSamples(t.msaa);
+  sky.setShadowSize(t.shadow);
+  perf.scale = Math.min(perf.scale, t.maxScale);
+  resize();
+}
+
 function resize() {
   const w = Math.floor(canvas.clientWidth || innerWidth);
   const h = Math.floor(canvas.clientHeight || innerHeight);
-  const dpr = renderer.getPixelRatio();
+  const tier = TIERS[perf.tier];
+  const pr = perf.basePixelRatio * Math.min(perf.scale, tier.maxScale);
+  renderer.setPixelRatio(pr);
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
-  const bw = Math.floor(w * dpr), bh = Math.floor(h * dpr);
+  const bw = Math.max(2, Math.floor(w * pr));
+  const bh = Math.max(2, Math.floor(h * pr));
   post.setSize(bw, bh);
-  ocean.setSize(bw, bh);
+  ocean.setSize(bw, bh, tier.reflScale);
 }
 addEventListener('resize', () => { if (post) resize(); });
+
+/**
+ * Dynamic resolution, then tier fallback. Framerate is spent on pixels first
+ * because that is the cheapest thing to give back; only if dropping to the
+ * tier's floor still misses the target does the tier itself step down.
+ */
+function autoTune(dt, rawMs) {
+  // measure the real frame time, not the timestep the physics was clamped to,
+  // or a machine slow enough to hit the clamp can never see how slow it is
+  perf.frameMs = perf.frameMs * 0.86 + Math.min(rawMs, 4000) * 0.14;
+  perf.adjustTimer += dt;
+  perf.frames++;
+  if (perf.adjustTimer < 1.0 || perf.frames < 4) return;
+  perf.adjustTimer = 0;
+
+  const tier = TIERS[perf.tier];
+  const slow = perf.frameMs > 20.5;    // below ~49 fps
+  const dire = perf.frameMs > 90.0;    // below ~11 fps: give up ground fast
+  const fast = perf.frameMs < 13.0;    // above ~77 fps
+
+  const i = TIER_ORDER.indexOf(perf.tier);
+  const canTier = i < TIER_ORDER.length - 1;
+  const FLOOR = 0.5;
+
+  if (slow) {
+    if (dire && canTier) {
+      // far off the pace: shedding features beats shaving pixels
+      perf.scale = 1.0;
+      applyTier(TIER_ORDER[i + 1]);
+      hud.toast(`Quality: ${TIERS[perf.tier].name}`, 1.8);
+    } else if (perf.scale > FLOOR) {
+      perf.scale = Math.max(FLOOR, perf.scale - (dire ? 0.15 : 0.1));
+      resize();
+    } else if (canTier) {
+      perf.scale = 1.0;
+      applyTier(TIER_ORDER[i + 1]);
+      hud.toast(`Quality: ${TIERS[perf.tier].name}`, 1.8);
+    }
+  } else if (fast && perf.scale < tier.maxScale) {
+    perf.scale = Math.min(tier.maxScale, perf.scale + 0.06);
+    resize();
+  }
+}
+
+const _probe = new THREE.Vector3();
+/**
+ * The refraction prepass is a whole extra scene render, and it only matters
+ * where you can actually see the bottom. Past ~30 m the water has absorbed
+ * everything anyway, so out in the bay the pass is simply skipped.
+ */
+function needsRefraction() {
+  if (waterDepthAt(camera.position.x, camera.position.z) < 34) return true;
+  camera.getWorldDirection(_probe);
+  for (const d of [120, 280, 500]) {
+    const x = camera.position.x + _probe.x * d;
+    const z = camera.position.z + _probe.z * d;
+    if (waterDepthAt(x, z) < 34) return true;
+  }
+  return false;
+}
 
 function hotkeys() {
   if (input.tapped('KeyC')) {
@@ -252,10 +367,10 @@ function hotkeys() {
   }
   if (input.tapped('KeyH')) document.getElementById('help').classList.toggle('hidden');
   if (input.tapped('KeyF')) {
-    state.quality = state.quality ? 0 : 1;
-    post.enabled = !!state.quality;
-    ocean.uniforms.uCloudReflections.value = state.quality;
-    hud.toast(state.quality ? 'Quality: high' : 'Quality: fast');
+    const i = (TIER_ORDER.indexOf(perf.tier) + 1) % TIER_ORDER.length;
+    perf.scale = 1.0;
+    applyTier(TIER_ORDER[i]);
+    hud.toast(`Quality: ${TIERS[perf.tier].name}`);
   }
   if (input.down('BracketLeft')) setSun(-0.35);
   if (input.down('BracketRight')) setSun(0.35);
@@ -297,6 +412,7 @@ function loop(now) {
   // coming back from a backgrounded tab does not teleport the boat
   const dt = Math.min(0.25, Math.max(0.0005, dtRaw));
   lastDt = dt;
+  const rawMs = Math.max(0.5, dtRaw * 1000);
 
   state.time += dt;
   if (state.paused) {
@@ -310,6 +426,7 @@ function loop(now) {
 
   input.update(dt);
   hotkeys();
+  autoTune(dt, rawMs);
 
   // gusts and shifts: the breeze is never quite steady
   const t = state.time;
@@ -343,9 +460,10 @@ function loop(now) {
   hud.el.mark.textContent = state.finished ? 'Complete' : state.marks[state.currentMark].name;
   hud.el.timer.textContent = state.raceStart === null ? '--:--' : fmtTime(state.raceTime);
 
-  fpsAcc += dt; fpsCount++;
+  fpsAcc += rawMs / 1000; fpsCount++;
   if (fpsAcc > 0.5) {
-    document.getElementById('fps').textContent = `${Math.round(fpsCount / fpsAcc)} fps`;
+    const fps = Math.round(fpsCount / fpsAcc);
+    hud.el.fps.textContent = `${fps} fps · ${TIERS[perf.tier].name.toLowerCase()} · ${Math.round(perf.scale * 100)}%`;
     fpsAcc = 0; fpsCount = 0;
   }
 }
@@ -368,7 +486,16 @@ function renderScene(dt, t) {
   sky.dome.position.copy(camera.position);
 
   ocean.update(camera, wake);
-  ocean.renderAuxiliary(renderer, scene, camera, [ocean.mesh, sky.dome]);
+  ocean.renderAuxiliary(renderer, scene, camera, [ocean.mesh, sky.dome], {
+    refraction: needsRefraction(),
+    reflection: TIERS[perf.tier].reflScale > 0,
+  });
+
+  // the sun does not move and the town does not walk about, so the shadow map
+  // only really needs to keep up with the boat
+  const every = TIERS[perf.tier].shadowEvery;
+  renderer.shadowMap.autoUpdate = false;
+  renderer.shadowMap.needsUpdate = (perf.frames % every) === 0;
 
   renderer.setRenderTarget(post.sceneRT);
   renderer.clear();
@@ -380,6 +507,7 @@ function renderScene(dt, t) {
 // handy for tuning from the console
 window.__leeward = { get scene() { return scene; }, get renderer() { return renderer; },
   get camera() { return camera; }, get ocean() { return ocean; }, get boat() { return boat; },
-  get sky() { return sky; }, get post() { return post; }, state, THREE };
+  get sky() { return sky; }, get post() { return post; }, state, perf, TIERS,
+  setTier: (n) => applyTier(n), THREE };
 
 boot();

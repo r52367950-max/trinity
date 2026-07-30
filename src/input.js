@@ -1,5 +1,13 @@
 import { clamp } from './utils.js';
 
+/** Pointer lock is optional and can be refused; never let that reject loudly. */
+function requestLock(canvas) {
+  try {
+    const p = canvas.requestPointerLock?.();
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch { /* the drag fallback covers it */ }
+}
+
 /** Keyboard, mouse-look and pointer lock. */
 export class Input {
   constructor(canvas) {
@@ -10,6 +18,7 @@ export class Input {
     this.rudder = 0;
     this.trim = 0;
     this.locked = false;
+    this.touchSteer = 0;
     this.sensitivity = 0.0022;
     this._taps = new Map();
 
@@ -24,20 +33,76 @@ export class Input {
     addEventListener('blur', () => this.keys.clear());
 
     canvas.addEventListener('click', () => {
-      if (!this.locked) canvas.requestPointerLock();
+      if (!this.locked) requestLock(canvas);
     });
     document.addEventListener('pointerlockchange', () => {
       this.locked = document.pointerLockElement === canvas;
       document.body.classList.toggle('locked', this.locked);
     });
+
+    // Drag fallback. Sandboxed iframes routinely refuse pointer lock, and
+    // without this the player would be unable to look around at all.
+    this.dragging = false;
+    let dx = 0, dy = 0;
+    canvas.addEventListener('mousedown', (e) => {
+      if (this.locked || e.button !== 0) return;
+      this.dragging = true; dx = e.clientX; dy = e.clientY;
+    });
+    addEventListener('mouseup', () => { this.dragging = false; });
+
     addEventListener('mousemove', (e) => {
-      if (!this.locked) return;
-      this.lookYaw -= e.movementX * this.sensitivity;
-      this.lookPitch = clamp(this.lookPitch - e.movementY * this.sensitivity, -1.25, 1.25);
+      let yaw = 0, pitch = 0;
+      if (this.locked) {
+        yaw = e.movementX * this.sensitivity;
+        pitch = e.movementY * this.sensitivity;
+      } else if (this.dragging) {
+        yaw = (e.clientX - dx) * 0.005;
+        pitch = (e.clientY - dy) * 0.005;
+        dx = e.clientX; dy = e.clientY;
+      } else return;
+      this.lookYaw -= yaw;
+      this.lookPitch = clamp(this.lookPitch - pitch, -1.25, 1.25);
       // keep the yaw wrapped so the "look ahead" recentre is always the short way
       if (this.lookYaw > Math.PI) this.lookYaw -= Math.PI * 2;
       if (this.lookYaw < -Math.PI) this.lookYaw += Math.PI * 2;
     });
+  }
+
+  /**
+   * Touch fallback: hold the bottom-left or bottom-right of the screen to put
+   * the helm over, drag anywhere else to look around.
+   */
+  installTouch(canvas) {
+    this.touchSteer = 0;
+    const steerZones = new Map();
+    let lookId = null, lx = 0, ly = 0;
+
+    const isSteer = (e) => e.clientY > innerHeight * 0.62;
+    canvas.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse') return;
+      canvas.setPointerCapture(e.pointerId);
+      if (isSteer(e)) {
+        steerZones.set(e.pointerId, e.clientX < innerWidth * 0.5 ? -1 : 1);
+        this.touchSteer = [...steerZones.values()].reduce((a, b) => a + b, 0);
+      } else {
+        lookId = e.pointerId; lx = e.clientX; ly = e.clientY;
+      }
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== lookId) return;
+      this.lookYaw -= (e.clientX - lx) * 0.004;
+      this.lookPitch = clamp(this.lookPitch - (e.clientY - ly) * 0.004, -1.25, 1.25);
+      lx = e.clientX; ly = e.clientY;
+    });
+    const end = (e) => {
+      if (steerZones.delete(e.pointerId)) {
+        this.touchSteer = [...steerZones.values()].reduce((a, b) => a + b, 0);
+      }
+      if (e.pointerId === lookId) lookId = null;
+    };
+    canvas.addEventListener('pointerup', end);
+    canvas.addEventListener('pointercancel', end);
+    canvas.style.touchAction = 'none';
   }
 
   /** True once per physical key press. */
@@ -50,8 +115,9 @@ export class Input {
   down(...codes) { return codes.some((c) => this.keys.has(c)); }
 
   update(dt) {
-    const steer = (this.down('KeyD', 'ArrowRight') ? 1 : 0) - (this.down('KeyA', 'ArrowLeft') ? 1 : 0);
-    const target = steer * (this.down('ShiftLeft', 'ShiftRight') ? 1 : 0.62);
+    const steer = (this.down('KeyD', 'ArrowRight') ? 1 : 0) - (this.down('KeyA', 'ArrowLeft') ? 1 : 0)
+      + this.touchSteer;
+    const target = Math.max(-1, Math.min(1, steer)) * (this.down('ShiftLeft', 'ShiftRight') ? 1 : 0.62);
     this.rudder += (target - this.rudder) * Math.min(1, dt * 7);
     if (steer === 0) this.rudder *= Math.max(0, 1 - dt * 4.5);
     if (this.down('Space')) this.rudder *= Math.max(0, 1 - dt * 12);

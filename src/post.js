@@ -168,6 +168,13 @@ export class Post {
     this.camera = new THREE.Camera();
   }
 
+  /** Changing the sample count needs the target reallocated. */
+  setSamples(n) {
+    if (this.sceneRT.samples === n) return;
+    this.sceneRT.samples = n;
+    this.sceneRT.dispose();
+  }
+
   setSize(w, h) {
     this.width = w; this.height = h;
     this.sceneRT.setSize(w, h);
