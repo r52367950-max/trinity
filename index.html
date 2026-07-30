@@ -6,11 +6,27 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%9B%B5%3C/text%3E%3C/svg%3E">
 <title>Leeward — 第一人称帆船</title>
 <style>
+  /*
+   * The page is a rendered sea under a computed sun, so it commits to one
+   * visual world on purpose: a dark glass instrument pod over the scene. A
+   * light theme would fight the image rather than serve it.
+   *
+   * Palette is off the chart table rather than off a swatch grid — hull white,
+   * abyss, chart green in limits, brass at the stop, sky blue for wind, and
+   * signal amber and red for the two things that can go wrong.
+   */
   :root {
+    color-scheme: dark;
     --ink: #eef3f7;
     --dim: rgba(238, 243, 247, 0.62);
     --glass: rgba(10, 20, 30, 0.42);
     --edge: rgba(255, 255, 255, 0.14);
+    --chart: #63d6a4;
+    --brass: #d9c46a;
+    --sky: #7ec8ff;
+    --signal: #f0b45c;
+    --alarm: #ee6a58;
+    --data: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -40,28 +56,34 @@
   }
   #readouts { padding: 14px 18px 12px; min-width: 232px; }
   #speedrow { display: flex; align-items: baseline; gap: 8px; }
-  #speed { font-size: 40px; font-weight: 300; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1; }
+  #speed { font-family: var(--data); font-size: 38px; font-weight: 400; letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums; line-height: 1; }
   .unit { font-size: 11px; letter-spacing: 0.16em; color: var(--dim); text-transform: uppercase; }
   #subrow { display: flex; gap: 16px; margin-top: 10px; font-size: 11px; letter-spacing: 0.08em; color: var(--dim); }
-  #subrow b { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+  #subrow b { font-family: var(--data); color: var(--ink); font-weight: 500; font-size: 12px;
+    font-variant-numeric: tabular-nums; letter-spacing: 0; }
   #trimwrap { margin-top: 11px; }
   #trimtrack { height: 4px; border-radius: 3px; background: rgba(255,255,255,0.13); overflow: hidden; }
-  #trim-bar { height: 100%; width: 55%; border-radius: 3px; background: linear-gradient(90deg, #63d6a4, #d9c46a); transition: width 0.1s linear; }
-  #trimrow { display: flex; justify-content: space-between; font-size: 10px; letter-spacing: 0.14em; color: var(--dim); margin-top: 6px; text-transform: uppercase; }
+  #trim-bar { height: 100%; width: 55%; border-radius: 3px;
+    background: linear-gradient(90deg, var(--chart), var(--brass)); transition: width 0.1s linear; }
+  #trimrow { display: flex; justify-content: space-between; font-size: 10px; letter-spacing: 0.14em;
+    color: var(--dim); margin-top: 6px; text-transform: uppercase; }
+  #trim-label { font-family: var(--data); letter-spacing: 0.08em; }
   #dialwrap { padding: 8px; }
   #dial { display: block; }
 
   #status { position: absolute; left: 50%; bottom: 218px; transform: translateX(-50%);
     font-size: 12px; letter-spacing: 0.28em; text-transform: uppercase; text-shadow: 0 2px 12px rgba(0,0,0,.7); }
-  #status.warn { color: #f0b45c; }
-  #status.bad { color: #ee6a58; }
+  #status.warn { color: var(--signal); }
+  #status.bad { color: var(--alarm); }
   #status.good { color: rgba(238,243,247,0.5); }
 
   /* ---- top left: course ---- */
   #course { position: absolute; top: 22px; left: 22px; padding: 12px 16px; min-width: 178px; }
   #course h4 { margin: 0 0 7px; font-size: 10px; letter-spacing: 0.22em; color: var(--dim); font-weight: 500; text-transform: uppercase; }
   #mark { font-size: 15px; font-weight: 400; }
-  #timer { font-size: 22px; font-weight: 300; font-variant-numeric: tabular-nums; margin-top: 3px; letter-spacing: 0.02em; }
+  #timer { font-family: var(--data); font-size: 21px; font-weight: 400; font-variant-numeric: tabular-nums;
+    margin-top: 4px; letter-spacing: 0.01em; }
 
   /* ---- top right: keys ---- */
   #help { position: absolute; top: 22px; right: 22px; padding: 13px 16px; font-size: 11.5px; line-height: 1.85; color: var(--dim); }
@@ -69,7 +91,9 @@
   #help kbd {
     display: inline-block; min-width: 19px; text-align: center; padding: 1px 5px; margin-right: 3px;
     border: 1px solid var(--edge); border-radius: 5px; background: rgba(255,255,255,0.07);
-    font: inherit; font-size: 10.5px; color: var(--ink);
+    /* the shorthand would reset the family, so set the longhands only */
+    font-family: var(--data); font-size: 10.5px; font-weight: 500; line-height: 1.45;
+    color: var(--ink);
   }
   #help.hidden { display: none; }
 
@@ -80,8 +104,8 @@
   }
   #toast.show { opacity: 1; transform: translate(-50%, 0); }
 
-  #fps { position: absolute; right: 22px; bottom: 22px; font-size: 10px; letter-spacing: .12em;
-    color: rgba(255,255,255,0.28); font-variant-numeric: tabular-nums; }
+  #fps { position: absolute; right: 22px; bottom: 22px; font-family: var(--data); font-size: 10px;
+    letter-spacing: .06em; color: rgba(255,255,255,0.30); font-variant-numeric: tabular-nums; }
 
   /* ---- start / loading ---- */
   #gate {
@@ -104,6 +128,12 @@
   }
   #play.ready { opacity: 1; transform: none; }
   #play:hover { background: #fff; }
+  #play:focus-visible { outline: 2px solid var(--sky); outline-offset: 4px; }
+  canvas#view:focus-visible { outline: 2px solid var(--sky); outline-offset: -2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #gate, #play, #toast, #trim-bar { transition: none; }
+  }
 </style>
 </head>
 <body>

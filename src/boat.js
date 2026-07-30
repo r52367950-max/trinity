@@ -249,10 +249,12 @@ export class Boat {
     const alloy = applyAtmosphere(new THREE.MeshStandardMaterial({ color: 0xb9bcc0, roughness: 0.32, metalness: 0.85 }));
     const teak = applyAtmosphere(new THREE.MeshStandardMaterial({ color: 0x8a6a42, roughness: 0.72 }));
     const dark = applyAtmosphere(new THREE.MeshStandardMaterial({ color: 0x24262b, roughness: 0.5 }));
-    // sailcloth: bright but not blown out, so the camber still reads as shape
+    // Sailcloth: bright but not blown out, so the camber still reads as shape.
+    // The small emissive stands in for transmission — real sailcloth passes
+    // light, so the windward face is never as dark as an opaque surface.
     this.sailMat = applyAtmosphere(new THREE.MeshStandardMaterial({
-      color: 0xc6c4bd, roughness: 0.9, metalness: 0.0, side: THREE.DoubleSide,
-      envMapIntensity: 0.32,
+      color: 0xc9c7c0, roughness: 0.9, metalness: 0.0, side: THREE.DoubleSide,
+      envMapIntensity: 0.5, emissive: 0xdfe4e8, emissiveIntensity: 0.11,
     }));
 
     const add = (geo, mat, x, y, z, rx = 0, ry = 0, rz = 0, parent = this.root) => {
