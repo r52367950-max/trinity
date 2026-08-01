@@ -9,6 +9,7 @@ import { Ocean } from './ocean.js';
 import { Wake } from './wake.js';
 import { Boat, LIVERIES } from './boat.js';
 import { Powerboat } from './powerboat.js';
+import { Droplet } from './droplet.js';
 import { Skipper } from './skipper.js';
 import { Post } from './post.js';
 import { Hud } from './hud.js';
@@ -59,6 +60,7 @@ const state = {
 let sky, terrain, ocean, wake, boat, post, hud, input, town, birds;
 let rival, rivalWake, skipper;
 let power, powerWake, powerWakeIdle = 99;
+let droplet, dropWake, dropWakeIdle = 99;
 const mooring = { pos: new THREE.Vector3(0, 0, 0), heading: 0 };
 
 const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
@@ -110,6 +112,8 @@ async function boot() {
     wake = new Wake(renderer, { size: 512, region: 320 });
     rivalWake = new Wake(renderer, { size: 256, region: 260 });
     powerWake = new Wake(renderer, { size: 384, region: 420 });
+    // the probe covers ground fast enough that its window has to be huge
+    dropWake = new Wake(renderer, { size: 384, region: 1400 });
   });
 
   await step(96, 'Rigging the boat…', () => {
@@ -131,6 +135,9 @@ async function boot() {
     mooring.heading = Math.atan2(dir.x, dir.y);
     mooring.pos.set(end.x + dir.y * 5.6, 0, end.y - dir.x * 5.6);
     power = new Powerboat(scene, { position: mooring.pos, heading: mooring.heading });
+
+    droplet = new Droplet(scene);
+    droplet.setNoise(noiseTex);
     post = new Post(renderer);
     hud = new Hud();
     input = new Input(canvas);
@@ -260,7 +267,9 @@ const tmp = new THREE.Vector3();
 const heading2 = new THREE.Vector2();
 
 /** Whichever helm you are standing at. */
-function helmed() { return state.vessel === 'power' ? power : boat; }
+function helmed() {
+  return state.vessel === 'power' ? power : state.vessel === 'drop' ? droplet : boat;
+}
 
 function updateCamera(dt) {
   const v = helmed();
@@ -270,7 +279,9 @@ function updateCamera(dt) {
     const a = v.heading + state.chaseAngle;
     const off = tmp.set(Math.sin(a) * state.chaseDist, state.chaseHeight, Math.cos(a) * state.chaseDist);
     chasePos.lerp(off.add(v.position), 1 - Math.exp(-dt * 2.6));
-    chaseAim.lerp(tmp.copy(v.position).setY(v.position.y + 3.4), 1 - Math.exp(-dt * 5));
+    // aim at the middle of whatever it is following — a mast height above a
+    // three-metre probe puts it off the bottom of the frame
+    chaseAim.lerp(tmp.copy(v.position).setY(v.position.y + (v.chaseAim ?? 3.4)), 1 - Math.exp(-dt * 5));
     camera.position.copy(chasePos);
     camera.up.set(0, 1, 0);
     camera.lookAt(chaseAim);
@@ -406,6 +417,7 @@ function autoTune(dt, rawMs) {
   }
 }
 
+const _focus = new THREE.Vector3();
 const _probe = new THREE.Vector3();
 /**
  * The refraction prepass is a whole extra scene render, and it only matters
@@ -432,7 +444,8 @@ function hotkeys() {
     boat.autoTrim = !boat.autoTrim;
     hud.toast(boat.autoTrim ? 'Auto trim on' : 'Manual sheet — W / S');
   }
-  if (input.tapped('KeyV')) boardOther();
+  if (input.tapped('KeyV')) boardNearest();
+  if (input.tapped('KeyG')) summonDroplet();
   if (input.tapped('KeyH')) document.getElementById('help').classList.toggle('hidden');
   if (input.tapped('KeyF')) {
     const i = (TIER_ORDER.indexOf(perf.tier) + 1) % TIER_ORDER.length;
@@ -455,6 +468,8 @@ function hotkeys() {
     power.heading = mooring.heading;
     power.surge = 0; power.sway = 0; power.yawRate = 0; power.roll = 0; power.rollRate = 0;
     power.throttle = 0; power.steer = 0; power.battery = 1; power.moored = true;
+    droplet.active = false; droplet.arriving = 0; droplet.surge = 0;
+    droplet.shock.strength = 0; droplet.altitude = 8;
     hud.toast('Back to the start');
   }
 }
@@ -466,25 +481,51 @@ function restart(b, x, z) {
 }
 
 /**
- * Step across to the other boat, if she is alongside. Deliberately not a
- * teleport: Kingfisher lies at the jetty, so getting to her is a short sail
- * into the bay rather than a keystroke.
+ * Step across to whichever craft is alongside. Deliberately not a teleport:
+ * Kingfisher lies at the jetty, so getting to her is a short sail into the bay
+ * rather than a keystroke.
  */
 const BOARDING_RANGE = 45;
-function boardOther() {
+const VESSELS = {
+  sail: { get it() { return boat; }, hint: () => `${boat.name} — 回到舵柄` },
+  power: { get it() { return power; }, hint: () => `${power.name} — W / S 油门 · A / D 转向` },
+  drop: { get it() { return droplet; }, hint: () => '水滴 — W / S 推进 · A / D 转向 · Q / E 升降 · Space 急停' },
+};
+
+function boardNearest() {
+  const here = state.vessel;
   const from = helmed();
-  const to = from === boat ? power : boat;
-  const d = Math.hypot(from.position.x - to.position.x, from.position.z - to.position.z);
-  if (d > BOARDING_RANGE) {
-    hud.toast(`${to.name} 在 ${Math.round(d)} m 外 · ${to.name} is ${Math.round(d)} m off`, 3.2);
+  let best = null, bestD = Infinity;
+  for (const key of Object.keys(VESSELS)) {
+    if (key === here) continue;
+    const v = VESSELS[key].it;
+    if (key === 'drop' && !v.active) continue;      // it is not here yet
+    const d = Math.hypot(from.position.x - v.position.x, from.position.z - v.position.z);
+    if (d < bestD) { bestD = d; best = key; }
+  }
+  if (!best) return;
+  if (bestD > BOARDING_RANGE) {
+    const to = VESSELS[best].it;
+    hud.toast(`${to.name} 在 ${Math.round(bestD)} m 外 · ${to.name} is ${Math.round(bestD)} m off`, 3.2);
     return;
   }
-  state.vessel = state.vessel === 'sail' ? 'power' : 'sail';
+  state.vessel = best;
   input.lookYaw = 0;
   input.lookPitch = -0.03;
-  hud.toast(state.vessel === 'power'
-    ? `${power.name} — W / S 油门 · A / D 转向`
-    : `${boat.name} — 回到舵柄`);
+  hud.toast(VESSELS[best].hint());
+}
+
+/** Call it down. It arrives the only way it knows how. */
+function summonDroplet() {
+  if (droplet.active && state.vessel !== 'drop') {
+    droplet.active = false;
+    hud.toast('水滴离开了 · the probe withdraws');
+    return;
+  }
+  if (droplet.active) { hud.toast('已经在船上了'); return; }
+  const from = helmed();
+  droplet.summon(from.position, from.heading);
+  hud.toast('有东西正在减速 · something is decelerating', 4.5);
 }
 
 /** The helm of a boat nobody is standing at. */
@@ -526,6 +567,8 @@ function loop(now) {
     boat.updateVisual(dt, state.time);
     rival.updateVisual(dt, state.time);
     power.updateVisual(dt, state.time);
+    droplet.cacheSea(state.time);
+    droplet.updateVisual(dt, state.time);
     updateCourse(dt);
     updateCamera(dt);
     birds(state.time);
@@ -545,6 +588,7 @@ function loop(now) {
   state.wind.from = state.wind.baseFrom + shift;
 
   const atSail = state.vessel === 'sail';
+  const atDrop = state.vessel === 'drop';
   if (atSail && input.trim !== 0) boat.autoTrim = false;
 
   // Fixed substeps: the rig, the heel spring and the rudder all need a short
@@ -561,7 +605,8 @@ function loop(now) {
     const st = t - dt + sub * (i + 1);
     rig = boat.update(sub, sailInput, state.wind, st);
     rival.update(sub, helm, state.wind, st);
-    power.update(sub, atSail ? null : input, st);
+    power.update(sub, state.vessel === 'power' ? input : null, st);
+    droplet.update(sub, atDrop ? input : null, st);
   }
 
   // Sails, buoyancy and pose are per-frame work: rebuilding them once per
@@ -569,6 +614,9 @@ function loop(now) {
   boat.updateVisual(dt, t);
   rival.updateVisual(dt, t);
   power.updateVisual(dt, t);
+  droplet.cacheSea(t);
+  droplet.updateVisual(dt, t);
+  droplet.writeOceanUniforms(ocean.uniforms.uDroplet, ocean.uniforms.uShock);
 
   heading2.set(Math.sin(boat.heading), Math.cos(boat.heading));
   wake.update(dt, boat.position, heading2, Math.abs(boat.surge), 9.5);
@@ -584,13 +632,27 @@ function loop(now) {
     powerWake.update(dt, power.position, heading2, power.speed * 1.35, 7.0);
   }
 
+  // The probe tears the surface open rather than parting it, so what it leaves
+  // is a gash the width of the dish it is dragging, not a Kelvin wake — hence
+  // the absurd hull length handed to the stamp.
+  const dropWorking = droplet.active && droplet.arriving <= 0 &&
+                      droplet.altitude < 26 && droplet.speed > 1.0;
+  dropWakeIdle = dropWorking ? 0 : dropWakeIdle + dt;
+  const dropTrail = dropWakeIdle < 26;
+  if (dropTrail) {
+    heading2.set(Math.sin(droplet.heading), Math.cos(droplet.heading));
+    dropWake.update(dt, droplet.position, heading2,
+      dropWorking ? 6.0 : 0, 26 - droplet.altitude * 0.5);
+  }
+
   updateCourse(dt);
   updateCamera(dt);
   birds(t);
 
-  renderScene(dt, t, powerTrail);
+  renderScene(dt, t, powerTrail, dropTrail);
 
-  if (atSail) {
+  if (atDrop) hud.updateDroplet({ droplet, time: t });
+  else if (atSail) {
     hud.update({ boat, wind: state.wind, boomAngle: rig.boomAngle * rig.tackSign, tackSign: rig.tackSign, time: t });
   } else {
     hud.updatePower({ power, wind: state.wind, time: t });
@@ -608,7 +670,7 @@ function loop(now) {
   }
 }
 
-function renderScene(dt, t, powerTrail = false) {
+function renderScene(dt, t, powerTrail = false, dropTrail = false) {
   // shared uniforms — one write, every shader sees it
   shared.uTime.value = t;
   shared.uCloudTime.value = t;
@@ -622,10 +684,18 @@ function renderScene(dt, t, powerTrail = false) {
   camera.updateMatrixWorld(true);
 
   if (sky.update(renderer, dt)) scene.environment = sky.environment;
-  sky.setShadowFocus(boat ? helmed().position : new THREE.Vector3());
+  // the shadow frustum follows you along the water, not up into the sky with
+  // the probe — nothing at 900 m needs a shadow map
+  if (boat) {
+    const h = helmed().position;
+    sky.setShadowFocus(_focus.set(h.x, 0, h.z));
+  } else {
+    sky.setShadowFocus(_focus.set(0, 0, 0));
+  }
   sky.dome.position.copy(camera.position);
 
-  ocean.update(camera, [wake, rivalWake, powerTrail ? powerWake : null]);
+  ocean.update(camera, [wake, rivalWake, powerTrail ? powerWake : null,
+    dropTrail ? dropWake : null]);
   ocean.renderAuxiliary(renderer, scene, camera, [ocean.mesh, sky.dome], {
     refraction: needsRefraction(),
     reflection: TIERS[perf.tier].reflScale > 0,
@@ -648,7 +718,7 @@ function renderScene(dt, t, powerTrail = false) {
 window.__leeward = { get scene() { return scene; }, get renderer() { return renderer; },
   get camera() { return camera; }, get ocean() { return ocean; }, get boat() { return boat; },
   get rival() { return rival; }, get skipper() { return skipper; }, get input() { return input; },
-  get power() { return power; }, get town() { return town; },
+  get power() { return power; }, get town() { return town; }, get droplet() { return droplet; },
   get sky() { return sky; }, get post() { return post; }, state, perf, TIERS,
   setTier: (n) => applyTier(n), THREE };
 

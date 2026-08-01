@@ -5,7 +5,7 @@ bay with a whitewashed town stacked up the hillside, and you sail — properly,
 against apparent wind, unable to point closer than about 40° to the breeze.
 *Mistral*, an AI-skippered rival, races you round the same five marks under the
 same physics. *Kingfisher*, an electric dayboat, lies at the jetty if you would
-rather have a throttle than an argument with the wind.
+rather have a throttle than an argument with the wind. And press `G`.
 
 Everything is generated at load time. There are no textures, no models and no
 assets on disk: the sea, the sky, the island, the town and the boat are all
@@ -32,7 +32,9 @@ Needs a WebGL2 browser. Click the canvas to capture the mouse.
 | `A` / `D` | steer (hold `Shift` for hard over) |
 | `W` / `S` | sheet in / ease the mainsail — or throttle, in the powerboat |
 | `Space` | centre the rudder / back to neutral |
-| `V` | step across to the other boat, when she is alongside |
+| `V` | step across to whatever is alongside |
+| `G` | call the probe down · press again to send it away |
+| `Q` / `E` | descend / climb (the probe only) |
 | `T` | auto-trim on/off |
 | `C` | helm view / chase camera |
 | `[` `]` | move the sun |
@@ -60,6 +62,44 @@ velocity — which is what makes sailing feel like sailing:
 - A soft wall at hull speed (1.34·√LWL ≈ 7 knots) keeps her honest.
 
 Run aground and she stops and shoves off the shelf.
+
+## The probe
+
+Press `G` and something decelerates out of the sky and stops beside you.
+
+It is three and a half metres of strong-interaction material: a teardrop with a
+needle at one end and a bulb at the other, absolutely smooth and a perfect
+mirror. Nothing else in the scene is a perfect mirror — the sea is only a
+partial one, everything else is rough — so it does not sit in the world so much
+as quote it back at you.
+
+The shape is one surface of revolution, `r(u) = u^a · √(1 − u²)`. The square
+root closes the tail with a vertical tangent, which is what makes that end read
+as a round pole rather than a second point; the `u^a` makes the tip approach
+zero with zero slope, which is what makes it a needle rather than a cone. `a`
+puts the widest section at `√(a/(a+1))` — about three quarters of the way aft,
+which is where a falling drop carries it.
+
+The mirror is analytic, not a cube map. Every reflected ray goes to one of two
+places: up, and it is the same scattering table the sky dome and the ocean use,
+so the probe agrees with the horizon behind it exactly; down, and it is the sea,
+which is itself mostly a mirror, so what comes back is the sky again,
+Fresnel-weighted over the water's own colour. Two lookups, no render targets,
+and it is *more* correct at the horizon than a 256-pixel cube would have been.
+
+It obeys none of the rest of the physics — no hull speed, no resistance curve,
+no inertia worth the name. Three hundred knots held, a hundred and eighty
+astern, a full stop inside a single frame, and a heading change through an
+acute angle with a turn radius under twenty metres at full speed, which on a
+three-metre object is not a turn at all. That is not a shortcut: a thing that
+can do those four things is a thing whose momentum is not its own problem, and
+the way it moves is the only evidence of that you ever get.
+
+The sea knows about it. It holds a dish pressed into the surface underneath
+itself — the ocean's vertex shader takes a well and a raised rim, with the
+normal tilted to match so it shades as a dish rather than a painted hole — and
+that dish drags a torn gash behind it at speed. Stop dead and the ring runs out
+across the water and dies.
 
 ## The powerboat
 
@@ -129,8 +169,19 @@ reflection into glitter instead of leaving a mirror. Refraction comes from a
 depth prepass and is absorbed through Beer–Lambert extinction, so shallow water
 over sand goes turquoise and deep water goes blue for the right reason. On top
 of that: GGX sun glitter, subsurface scattering through backlit wave crests,
-and four sources of foam — wave-crest folding from the Jacobian, breaking surf
-from the shoaling term, a wash-line at the beach, and a persistent boat wake.
+and foam from six sources — wave-crest folding from the Jacobian, breaking surf
+from the shoaling term, a wash-line at the beach, a persistent wake per hull,
+and the probe's dish and shock ring.
+
+**Foam.** Foam is not paint, and treating it as paint is what makes water look
+like spilled milk. Two things fix it. First the coverage is *cut* against the
+bubble texture rather than faded through it — a `smoothstep` against
+`coverage × bubbles` instead of a linear ramp — so the raft tears open at its
+edges and has holes in it. Second, colour is a function of how deep the raft is,
+not whether it exists: thin foam is aerated *water* and keeps the sea's own
+colour and in-scattering, and only where it piles up does it start behaving
+like a bright diffuse surface. It never goes fully opaque either, so the water
+underneath still shows through the thin parts.
 
 **Sky.** A Rayleigh + Mie scattering integral, evaluated once into a small
 lookup table indexed by (angle to sun, view elevation). For a fixed sun that
@@ -146,8 +197,9 @@ they reflect in the water.
 the boat. Each frame it resamples itself at the new offset, blurs a little,
 fades a little, and the hull stamps in fresh turbulence — stern churn plus the
 two diverging arms of a Kelvin wake. The trail persists in world space for
-about half a minute. There is one buffer per hull; the powerboat's only runs
-while there is something in it to see, since she spends most of the game tied up.
+about half a minute. There are four buffers — the yacht, the rival, the
+powerboat and the probe — and each only runs while there is something in it to
+see, since most of them spend most of the game tied up or not here yet.
 
 **A note on handedness.** Forward is +Z and up is +Y, so forward × up lands on
 −X: the boats' local +X points to *port*, not starboard. The force
@@ -215,6 +267,7 @@ src/
   town.js           houses, harbour, lighthouse, trees, rocks, gulls
   boat.js           hull loft, deck gear, rig, sails, sailing physics
   powerboat.js      hard-chine deep-V, planing physics, battery
+  droplet.js        the probe: teardrop of revolution, analytic mirror
   skipper.js        the rival's helmsman — VMG planner over candidate courses
   wake.js           persistent world-space foam buffer
   post.js           HDR, bloom, ACES, vignette, dither

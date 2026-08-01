@@ -154,6 +154,104 @@ export class Hud {
     this.drawPowerDial(power);
   }
 
+  /**
+   * The probe's face. It shares no units with the boats and no instrument
+   * either: nothing here is a compass rose, because nothing it does is
+   * relative to the wind.
+   */
+  updateDroplet(state) {
+    const { droplet, time } = state;
+    this.setLabels('HDG', 'ALT', 'MODE', 'Thrust');
+
+    const kn = droplet.knots;
+    this.el.speed.textContent = Math.abs(kn) < 100 ? kn.toFixed(1) : kn.toFixed(0);
+    const hdg = ((droplet.heading * 180) / Math.PI + 360) % 360;
+    this.el.heading.textContent = hdg.toFixed(0).padStart(3, '0') + '°';
+    this.el.wind.textContent = `${droplet.altitude < 100 ? droplet.altitude.toFixed(1) : droplet.altitude.toFixed(0)} m`;
+    this.el.heelLabel.textContent = droplet.arriving > 0 ? 'ENTRY'
+      : Math.abs(kn) < 0.5 ? 'HOLD' : kn < 0 ? 'ASTERN' : 'RUN';
+
+    const frac = Math.round(Math.abs(droplet.charge) * 100);
+    this.el.trimBar.style.width = Math.min(100, frac) + '%';
+    this.el.trimLabel.textContent = `${frac}%`;
+
+    let status = '', kind = 'good';
+    if (droplet.arriving > 0) { status = 'INBOUND'; kind = 'warn'; }
+    else if (droplet.stopFlash > 0.05) { status = 'FULL STOP'; kind = 'warn'; }
+    else if (Math.abs(kn) > 240) status = 'STRONG INTERACTION';
+    else if (Math.abs(kn) < 0.5) status = 'STATION KEEPING';
+    this.setStatus(status, kind);
+
+    this._tick();
+    this.drawDropletDial(droplet);
+  }
+
+  drawDropletDial(droplet) {
+    const c = this.ctx;
+    const s = this.size;
+    const cx = s / 2, cy = s / 2, R = s / 2 - 14;
+    c.clearRect(0, 0, s, s);
+    c.save();
+    c.translate(cx, cy);
+
+    // concentric rings, because the thing has no orientation worth reading —
+    // only a magnitude and a direction along its own axis
+    c.strokeStyle = 'rgba(126, 200, 255, 0.16)';
+    c.lineWidth = 1;
+    for (const f of [1.0, 0.72, 0.44]) {
+      c.beginPath(); c.arc(0, 0, R * f, 0, Math.PI * 2); c.stroke();
+    }
+    for (let i = 0; i < 24; i++) {
+      const a = (i / 24) * Math.PI * 2;
+      c.strokeStyle = i % 6 === 0 ? 'rgba(126,200,255,0.5)' : 'rgba(126,200,255,0.16)';
+      c.beginPath();
+      c.moveTo(Math.sin(a) * R, -Math.cos(a) * R);
+      c.lineTo(Math.sin(a) * (R - (i % 6 === 0 ? 8 : 4)), -Math.cos(a) * (R - (i % 6 === 0 ? 8 : 4)));
+      c.stroke();
+    }
+
+    // the velocity vector: straight up when running, straight down astern
+    const v = droplet.surge / 148;
+    const len = Math.min(1, Math.abs(v)) * R * 0.86;
+    c.strokeStyle = v < 0 ? '#f0b45c' : '#7ec8ff';
+    c.lineWidth = 3;
+    c.beginPath();
+    c.moveTo(0, 0);
+    c.lineTo(0, v >= 0 ? -len : len);
+    c.stroke();
+    c.fillStyle = c.strokeStyle;
+    const tip = v >= 0 ? -len : len;
+    const dir = v >= 0 ? -1 : 1;
+    c.beginPath();
+    c.moveTo(0, tip + dir * 7);
+    c.lineTo(-5, tip);
+    c.lineTo(5, tip);
+    c.closePath();
+    c.fill();
+
+    // the drop itself, sitting at the centre
+    c.fillStyle = 'rgba(238,243,247,0.9)';
+    c.beginPath();
+    c.moveTo(0, -R * 0.20);
+    c.bezierCurveTo(R * 0.10, -R * 0.02, R * 0.11, R * 0.13, 0, R * 0.16);
+    c.bezierCurveTo(-R * 0.11, R * 0.13, -R * 0.10, -R * 0.02, 0, -R * 0.20);
+    c.fill();
+
+    // altitude ladder down the left edge
+    const alt = Math.min(1, Math.log10(1 + droplet.altitude) / 3);
+    c.fillStyle = 'rgba(126,200,255,0.18)';
+    c.fillRect(-R - 5, -R * 0.8, 3, R * 1.6);
+    c.fillStyle = '#7ec8ff';
+    c.fillRect(-R - 5, R * 0.8 - alt * R * 1.6, 3, alt * R * 1.6);
+
+    c.restore();
+    c.fillStyle = 'rgba(126,200,255,0.75)';
+    c.font = '600 10px ui-monospace, monospace';
+    c.textAlign = 'center';
+    c.fillText('水滴 · PROBE', cx, 12);
+    c.fillText(`ALT ${droplet.altitude < 100 ? droplet.altitude.toFixed(1) : droplet.altitude.toFixed(0)} m`, cx, s - 2);
+  }
+
   drawPowerDial(power) {
     const c = this.ctx;
     const s = this.size;

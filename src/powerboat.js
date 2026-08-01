@@ -316,6 +316,7 @@ export class Powerboat {
     this.planing = 0;
     this.aground = 0;
     this.moored = true;
+    this.chaseAim = 1.4;
 
     this.build();
   }

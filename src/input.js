@@ -18,6 +18,7 @@ export class Input {
     this.rudder = 0;
     this.trim = 0;
     this.neutral = false;
+    this.climb = 0;
     this.locked = false;
     this.touchSteer = 0;
     this.sensitivity = 0.0022;
@@ -121,9 +122,13 @@ export class Input {
     const target = Math.max(-1, Math.min(1, steer)) * (this.down('ShiftLeft', 'ShiftRight') ? 1 : 0.62);
     this.rudder += (target - this.rudder) * Math.min(1, dt * 7);
     if (steer === 0) this.rudder *= Math.max(0, 1 - dt * 4.5);
-    this.neutral = this.down('Space');
+    // A tap has to survive a slow frame: at a few fps the key is up again
+    // before the next sample, and "stop" is not a command to drop on the floor.
+    this.neutral = this.down('Space') || this.tapped('Space');
     if (this.neutral) this.rudder *= Math.max(0, 1 - dt * 12);
 
     this.trim = (this.down('KeyS', 'ArrowDown') ? 1 : 0) - (this.down('KeyW', 'ArrowUp') ? 1 : 0);
+    // only the probe can climb, but the axis costs nothing to carry
+    this.climb = (this.down('KeyE') ? 1 : 0) - (this.down('KeyQ') ? 1 : 0);
   }
 }

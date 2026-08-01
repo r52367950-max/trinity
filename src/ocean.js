@@ -20,6 +20,32 @@ import { SKY_SAMPLE_GLSL, CLOUD_GLSL } from './atmosphere.js';
 
 const RINGS = 240;
 const SEGMENTS = 320;
+
+/**
+ * How many things can be leaving a trail at once: the yacht, the rival, the
+ * powerboat and the probe. Each is an independent scrolling buffer, so the
+ * shader side is generated rather than written out four times.
+ */
+const MAX_WAKES = 4;
+
+function wakeUniforms() {
+  const u = {};
+  for (let i = 0; i < MAX_WAKES; i++) {
+    u[`uWake${i}`] = { value: null };
+    u[`uWakeCenter${i}`] = { value: new THREE.Vector2() };
+    u[`uWakeRegion${i}`] = { value: 320 };
+    u[`uWakeValid${i}`] = { value: 0 };
+  }
+  return u;
+}
+
+const WAKE_DECLS = Array.from({ length: MAX_WAKES }, (_, i) =>
+  `uniform sampler2D uWake${i};\nuniform vec2 uWakeCenter${i};\nuniform float uWakeRegion${i}, uWakeValid${i};`
+).join('\n');
+
+const WAKE_SAMPLE = Array.from({ length: MAX_WAKES }, (_, i) =>
+  `  if (uWakeValid${i} > 0.5) wake = max(wake, wakeAt(uWake${i}, uWakeCenter${i}, uWakeRegion${i}, vWorld.xz));`
+).join('\n');
 const R_MAX = 9500;
 const R_NEAR = 300;
 
@@ -111,22 +137,17 @@ export class Ocean {
       uNear: { value: 0.15 },
       uFar: { value: 30000 },
 
-      // one scrolling wake buffer per hull on the water
-      uWake: { value: null },
-      uWakeCenter: { value: new THREE.Vector2() },
-      uWakeRegion: { value: 320 },
-      uWake2: { value: null },
-      uWakeCenter2: { value: new THREE.Vector2() },
-      uWakeRegion2: { value: 320 },
-      uWake2Valid: { value: 0 },
-      uWake3: { value: null },
-      uWakeCenter3: { value: new THREE.Vector2() },
-      uWakeRegion3: { value: 320 },
-      uWake3Valid: { value: 0 },
+      // one scrolling wake buffer per hull on the water, see MAX_WAKES
+      ...wakeUniforms(),
 
       uExtinction: { value: new THREE.Vector3(0.42, 0.115, 0.058) },
       uScatterColor: { value: new THREE.Color(0.045, 0.21, 0.235) },
       uDeepColor: { value: new THREE.Color(0.010, 0.046, 0.080) },
+      // the probe: centre.xz, hover height, strength — and the ring it throws
+      // off when it stops dead
+      uDroplet: { value: new THREE.Vector4(0, 0, 999, 0) },
+      uShock: { value: new THREE.Vector4(0, 0, 0, 0) },
+
       uFoamAmount: { value: 1.0 },
       uPlanarStrength: { value: 1.0 },
       uRefractionValid: { value: 1.0 },
@@ -158,7 +179,9 @@ export class Ocean {
       uniform sampler2D uTerrainHeight;
       uniform vec3 uTerrainInfo;   // centre.x, centre.z, size
       uniform mat4 uReflMatrix;
+      uniform vec4 uDroplet;       // centre.xz, hover height, strength
 
+      varying float vDropRim;
       varying vec3 vWorld;
       varying vec3 vWaveNormal;
       varying float vFold;
@@ -193,6 +216,24 @@ export class Ocean {
         float fold;
         oceanSurface(worldXZ, sf.x * ampFade, lodFade, disp, nrm, fold);
 
+        // The probe holds the sea down under itself. Whatever is doing it, it
+        // is not air pressure — a metre-wide object does not dish out ten
+        // metres of ocean — so it reads as force with no visible cause, which
+        // is the point of the thing.
+        // scaled off the thing doing it: a three-metre object dishes out a
+        // few metres of sea, not a crater you could park a ship in
+        vec2 toDrop = worldXZ - uDroplet.xy;
+        float dropR = 1.7 + uDroplet.z * 0.34;
+        float dropD = length(toDrop) / dropR;
+        float well = exp(-dropD * dropD);
+        float rim = exp(-pow((dropD - 1.70) / 0.58, 2.0));
+        disp.y -= uDroplet.w * (well * 1.55 - rim * 0.30);
+        vDropRim = uDroplet.w * rim;
+        // tilt the normal to match, or the dish reads as a flat painted hole
+        float dhdr = -uDroplet.w * (-3.1 * dropD * well + 1.78 * (dropD - 1.70) * rim) / dropR;
+        vec2 radial = toDrop / (length(toDrop) + 1e-4);
+        nrm = normalize(vec3(nrm.x - radial.x * dhdr, nrm.y, nrm.z - radial.y * dhdr));
+
         vec3 world = vec3(worldXZ.x + disp.x, disp.y, worldXZ.y + disp.z);
 
         vWorld = world;
@@ -221,11 +262,12 @@ export class Ocean {
 
       uniform float uSunIntensity;
       uniform sampler2D uWaterNormal, uFoamTex, uReflection, uRefraction, uDepthTex;
-      uniform sampler2D uWake, uWake2, uWake3;
-      uniform vec2 uResolution, uWindDir, uWakeCenter, uWakeCenter2, uWakeCenter3;
+      ${WAKE_DECLS}
+      uniform vec2 uResolution, uWindDir;
       uniform float uNear, uFar, uTime, uWindSpeed;
-      uniform float uWakeRegion, uWakeRegion2, uWakeRegion3, uWake2Valid, uWake3Valid;
       uniform float uFoamAmount, uCloudReflections, uDetailStrength, uMicroDetail;
+      uniform vec4 uShock;         // centre.xz, radius, strength
+      varying float vDropRim;
       uniform float uPlanarStrength, uRefractionValid;
       uniform float uDebug;
       uniform vec3 uExtinction;
@@ -407,7 +449,11 @@ export class Ocean {
         vec2 fuv = vWorld.xz * 0.055;
         vec4 fTex = texture2D(uFoamTex, fuv + uWindDir * uTime * 0.004);
         vec4 fTex2 = texture2D(uFoamTex, fuv * 2.7 - uWindDir * uTime * 0.011);
-        float bubbles = fTex.r * 0.65 + fTex2.g * 0.55;
+        // a third, much finer scale, kept close in — foam near the boat wants
+        // individual bubbles, foam at 200 m wants none
+        float near = 1.0 - smoothstep(18.0, 130.0, viewDist);
+        vec4 fTex3 = texture2D(uFoamTex, fuv * 6.9 + uWindDir.yx * uTime * 0.021);
+        float bubbles = fTex.r * 0.55 + fTex2.g * 0.42 + fTex3.b * 0.38 * near;
 
         float crest = smoothstep(0.68, 0.12, vFold);
         // a shoaling wave dumps foam down its face as it topples
@@ -419,20 +465,39 @@ export class Ocean {
         float shore = smoothstep(3.6, 0.10, vWaterDepth) * (0.55 + 0.85 * wash);
         shore *= smoothstep(0.0, 0.22, vWaterDepth);
 
-        float wake = wakeAt(uWake, uWakeCenter, uWakeRegion, vWorld.xz);
-        if (uWake2Valid > 0.5) wake = max(wake, wakeAt(uWake2, uWakeCenter2, uWakeRegion2, vWorld.xz));
-        if (uWake3Valid > 0.5) wake = max(wake, wakeAt(uWake3, uWakeCenter3, uWakeRegion3, vWorld.xz));
+        float wake = 0.0;
+${WAKE_SAMPLE}
 
-        float foam = clamp(crest * 0.85 + breaker + shore + wake * 1.15, 0.0, 1.0);
-        foam = clamp(foam * (0.42 + 1.05 * bubbles), 0.0, 1.0) * uFoamAmount;
-        foam *= 1.0 - smoothstep(900.0, 2600.0, viewDist);
+        // the probe's rim, plus the ring that runs out from a dead stop
+        float shockD = length(vWorld.xz - uShock.xy);
+        float shock = uShock.w * exp(-pow((shockD - uShock.z) / max(2.5, uShock.z * 0.16), 2.0));
+
+        float coverage = (crest * 0.85 + breaker + shore + wake * 0.95
+                          + vDropRim * 0.85 + shock * 1.2) * uFoamAmount;
+        coverage *= 1.0 - smoothstep(900.0, 2600.0, viewDist);
+
+        // Foam is not paint. It is a raft of bubbles that tears open at its
+        // edges, so the coverage is *cut* against the bubble texture rather
+        // than faded through it — that is what puts holes in the white instead
+        // of leaving a smooth smear.
+        float foam = smoothstep(0.30, 0.86, coverage * (0.40 + 1.05 * bubbles));
+        // and how deep the raft is, which is a different question from whether
+        // there is any
+        float thick = smoothstep(0.22, 1.10, coverage);
 
         vec3 skyAmbient = skyRadiance(vec3(0.0, 1.0, 0.0));
-        vec3 foamColor = (uSunColor * uSunIntensity * (0.30 + 0.55 * NoL) + skyAmbient * 0.9) *
-                         (0.72 + 0.42 * fTex2.g);
-        color = mix(color, foamColor, foam);
-        // a glint of wet sparkle riding on the foam
-        color += foamColor * fTex.a * foam * 0.25;
+        // Thin foam is aerated *water*: it keeps the sea's own colour and only
+        // starts behaving like a bright diffuse surface where it piles up. A
+        // single white made the whole thing look like spilled milk.
+        vec3 wetFoam = mix(underwater, uScatterColor * waterLight * 2.4, 0.5);
+        vec3 dryFoam = uSunColor * uSunIntensity * (0.22 + 0.42 * NoL) + skyAmbient * 0.60;
+        vec3 foamColor = mix(wetFoam, dryFoam, thick * (0.42 + 0.58 * bubbles));
+        // the raft is not flat, so let it shade itself
+        foamColor *= 0.78 + 0.42 * fTex2.g;
+        // never quite opaque: the water underneath still shows through
+        color = mix(color, foamColor, foam * 0.90);
+        // a few genuinely wet highlights riding on the thickest patches
+        color += dryFoam * fTex.a * foam * thick * 0.20;
 
         color = applyAerial(color, vWorld);
 
@@ -535,26 +600,21 @@ export class Ocean {
     this.uniforms.uFar.value = camera.far;
   }
 
-  /** `wakes` is one buffer per hull; the first is required, the rest optional. */
+  /** `wakes` is one buffer per trail-leaving thing; entries may be null. */
   update(camera, wakes) {
     this.uniforms.uCenter.value.set(camera.position.x, camera.position.z);
     const u = this.uniforms;
-    const slots = [
-      [u.uWake, u.uWakeCenter, u.uWakeRegion, null],
-      [u.uWake2, u.uWakeCenter2, u.uWakeRegion2, u.uWake2Valid],
-      [u.uWake3, u.uWakeCenter3, u.uWakeRegion3, u.uWake3Valid],
-    ];
-    for (let i = 0; i < slots.length; i++) {
-      const [tex, center, region, valid] = slots[i];
+    const fallback = wakes.find(Boolean);
+    for (let i = 0; i < MAX_WAKES; i++) {
       const w = wakes[i];
-      if (valid) valid.value = w ? 1 : 0;
+      u[`uWakeValid${i}`].value = w ? 1 : 0;
       if (w) {
-        tex.value = w.texture;
-        center.value.copy(w.center);
-        region.value = w.region;
-      } else if (!tex.value) {
+        u[`uWake${i}`].value = w.texture;
+        u[`uWakeCenter${i}`].value.copy(w.center);
+        u[`uWakeRegion${i}`].value = w.region;
+      } else if (!u[`uWake${i}`].value && fallback) {
         // a sampler still has to be bound even when its branch never runs
-        tex.value = wakes[0] ? wakes[0].texture : null;
+        u[`uWake${i}`].value = fallback.texture;
       }
     }
   }

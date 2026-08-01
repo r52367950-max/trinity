@@ -22,7 +22,8 @@ const out = process.argv[2] || join(root, 'dist', 'leeward.html');
 // dependency order — imports only ever point backwards in this list
 const MODULES = [
   'layers', 'shared', 'utils', 'noise', 'atmosphere', 'materials', 'waves',
-  'terrain', 'town', 'ocean', 'wake', 'boat', 'powerboat', 'skipper', 'post', 'hud',
+  'terrain', 'town', 'ocean', 'wake', 'boat', 'powerboat', 'droplet', 'skipper',
+  'post', 'hud',
   'input', 'main',
 ];
 
