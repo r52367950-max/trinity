@@ -36,7 +36,8 @@ Needs a WebGL2 browser. Click the canvas to capture the mouse.
 | `G` | call the probe down · press again to send it away |
 | `Q` / `E` | descend / climb (the probe only) |
 | `T` | auto-trim on/off |
-| `C` | helm view / chase camera |
+| `C` | cycle view: helm · orbit · fly-by |
+| wheel | orbit distance |
 | `[` `]` | move the sun |
 | `-` `=` | wind strength |
 | `H` | hide the key list · `F` quality tier · `R` restart |
@@ -63,6 +64,25 @@ velocity — which is what makes sailing feel like sailing:
 
 Run aground and she stops and shoves off the shelf.
 
+## Cameras
+
+Three, cycled on `C`. **Helm** is first person from wherever the eyes belong on
+that craft. **Orbit** swings around it on the mouse with the wheel for distance.
+**Fly-by** drops a fixed point in the world ahead of you and lets you go past it,
+re-anchoring when you get away — which is the only view that shows three hundred
+knots for what it is.
+
+The orbit camera is *placed*, not chased. The old one lerped toward a moving
+offset in world space, which is fine at six knots and hopeless at two hundred
+and eighty: it simply never caught up. Anchoring the offset to the vessel means
+it cannot fall behind at any speed, and the only smoothing left is on the point
+it aims at. It also opens on a three-quarter view rather than dead astern —
+astern of a boat is her transom, and astern of the probe is a point aimed at
+your eye.
+
+Boarding the probe puts you straight into orbit, because there is nothing to see
+from inside it.
+
 ## The probe
 
 Press `G` and something decelerates out of the sky and stops beside you.
@@ -80,12 +100,27 @@ zero with zero slope, which is what makes it a needle rather than a cone. `a`
 puts the widest section at `√(a/(a+1))` — about three quarters of the way aft,
 which is where a falling drop carries it.
 
+The bulb leads and the needle trails, which is how it flies in the book and
+also the better silhouette head-on. Rings are spaced on a cosine so they bunch
+at both poles, where all the curvature is and where a mirror shows faceting
+first.
+
 The mirror is analytic, not a cube map. Every reflected ray goes to one of two
 places: up, and it is the same scattering table the sky dome and the ocean use,
 so the probe agrees with the horizon behind it exactly; down, and it is the sea,
 which is itself mostly a mirror, so what comes back is the sky again,
 Fresnel-weighted over the water's own colour. Two lookups, no render targets,
 and it is *more* correct at the horizon than a 256-pixel cube would have been.
+
+What comes back is then treated as **metal, not glass**. A true mirror under
+this sky is pale blue all over and the eye reads that as a soap bubble. Silver
+Fresnel (F0 ≈ 0.97, 0.95, 0.91), reflectivity under one, ten percent of the sky
+averaged toward the surface normal for the few degrees of lobe polished steel
+actually has, half the chroma pulled out — and then, crucially, a mild power
+curve to put the contrast back. Desaturating closes the tonal gap; the curve
+reopens it, and without that step the thing reads as matte porcelain rather
+than as something machined. What you want is bright where it takes the sky,
+genuinely dark where it takes the sea, and a hard horizon line between.
 
 It obeys none of the rest of the physics — no hull speed, no resistance curve,
 no inertia worth the name. Three hundred knots held, a hundred and eighty
@@ -95,11 +130,13 @@ three-metre object is not a turn at all. That is not a shortcut: a thing that
 can do those four things is a thing whose momentum is not its own problem, and
 the way it moves is the only evidence of that you ever get.
 
-The sea knows about it. It holds a dish pressed into the surface underneath
-itself — the ocean's vertex shader takes a well and a raised rim, with the
-normal tilted to match so it shades as a dish rather than a painted hole — and
-that dish drags a torn gash behind it at speed. Stop dead and the ring runs out
-across the water and dies.
+The sea knows about it. The ocean's vertex shader takes a pressed well and a
+raised rim with the normal tilted to match, so it shades as a dish rather than
+a painted hole — and the well is not a point but a **segment**, running from
+under the probe back along the way it came. Standing still that is a dish;
+moving, it is a trench with the water held apart along both walls, tapering
+shut a couple of hundred metres astern where the sea falls back in. Stop dead
+and a ring runs out across the water and dies.
 
 ## The powerboat
 
@@ -182,6 +219,15 @@ not whether it exists: thin foam is aerated *water* and keeps the sea's own
 colour and in-scattering, and only where it piles up does it start behaving
 like a bright diffuse surface. It never goes fully opaque either, so the water
 underneath still shows through the thin parts.
+
+**The rest of the bay.** A working fleet on its moorings behind the harbour
+arm, forty-odd pot buoys strung through the shallows, and a stack of rock
+standing offshore. Everything that floats rides the same wave function the
+player's hull does, so a swell rolling in lifts the whole anchorage in sequence
+instead of leaving a row of boats pasted flat on a moving surface. Each hull is
+one merged mesh; the buoys are a single instanced draw on the prop layer, since
+forty of them are worth almost nothing individually and nothing at all in a
+wave-distorted mirror.
 
 **Sky.** A Rayleigh + Mie scattering integral, evaluated once into a small
 lookup table indexed by (angle to sun, view elevation). For a fixed sun that
@@ -267,7 +313,8 @@ src/
   town.js           houses, harbour, lighthouse, trees, rocks, gulls
   boat.js           hull loft, deck gear, rig, sails, sailing physics
   powerboat.js      hard-chine deep-V, planing physics, battery
-  droplet.js        the probe: teardrop of revolution, analytic mirror
+  droplet.js        the probe: teardrop of revolution, analytic steel
+  moorings.js       the moored fleet, pot buoys, the offshore stack
   skipper.js        the rival's helmsman — VMG planner over candidate courses
   wake.js           persistent world-space foam buffer
   post.js           HDR, bloom, ACES, vignette, dither

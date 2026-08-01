@@ -52,7 +52,9 @@ function dropRadius(u) {
 }
 
 function buildDroplet(length = LENGTH, maxDiameter = 1.55) {
-  const NU = 132, NV = 72;
+  // A mirror shows its own silhouette more honestly than anything else in the
+  // scene does, so this is worth the triangles.
+  const NU = 180, NV = 96;
   // normalise so the widest section is exactly maxDiameter across
   const uMax = Math.sqrt(PROFILE_A / (PROFILE_A + 1));
   const scale = (maxDiameter / 2) / dropRadius(uMax);
@@ -62,11 +64,13 @@ function buildDroplet(length = LENGTH, maxDiameter = 1.55) {
   const idx = [];
   let k = 0;
   for (let i = 0; i <= NU; i++) {
-    // bunch the rings toward the tip, where all the curvature is
-    const u = Math.pow(i / NU, 1.35);
+    // cosine spacing: rings bunch at both poles, which is where all the
+    // curvature is and where a mirror shows faceting first
+    const u = 0.5 - 0.5 * Math.cos(Math.PI * (i / NU));
     const r = dropRadius(u) * scale;
-    // the tip points along +Z, so the thing flies the way it is pointing
-    const z = (0.5 - u) * length;
+    // The bulb leads and the needle trails — which is how the thing flies in
+    // the book, and it is also the better silhouette head-on.
+    const z = (u - 0.5) * length;
     for (let j = 0; j <= NV; j++) {
       const a = (j / NV) * Math.PI * 2;
       pos[k] = Math.cos(a) * r;
@@ -87,10 +91,14 @@ function buildDroplet(length = LENGTH, maxDiameter = 1.55) {
   g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
   g.setIndex(idx);
   g.computeVertexNormals();
-  // the tip is a singular point and averaging around it gives garbage; aim it
-  // straight down the axis instead
+  // both ends are singular points, and averaging around a zero-radius ring
+  // gives garbage; aim them straight down the axis instead
   const n = g.getAttribute('normal');
-  for (let j = 0; j <= NV; j++) n.setXYZ(j, 0, 0, 1);
+  const last = NU * (NV + 1);
+  for (let j = 0; j <= NV; j++) {
+    n.setXYZ(j, 0, 0, -1);            // the needle, trailing
+    n.setXYZ(last + j, 0, 0, 1);      // the bulb, leading
+  }
   n.needsUpdate = true;
   g.computeBoundingSphere();
   return g;
@@ -101,7 +109,7 @@ function buildDroplet(length = LENGTH, maxDiameter = 1.55) {
 // ---------------------------------------------------------------------------
 
 /**
- * A perfect mirror, evaluated analytically rather than from a cube map.
+ * Polished steel, evaluated analytically rather than from a cube map.
  *
  * Every reflected ray goes to one of two places. Up, and it is the same
  * scattering table the sky dome and the ocean use, so the probe agrees with
@@ -110,6 +118,12 @@ function buildDroplet(length = LENGTH, maxDiameter = 1.55) {
  * the water's own colour, plus whatever the sun is doing on it. Two lookups
  * and no render targets, and it is *more* correct at the horizon than a
  * 256-pixel cube would be.
+ *
+ * What comes back then gets treated as *metal* rather than as a soap bubble.
+ * A perfect mirror under this sky is mostly pale blue, which reads as glass;
+ * a silver Fresnel term, a reflectivity under one, and pulling half the
+ * chroma out of the reflection is what turns it into something you would
+ * believe was machined.
  */
 function dropletMaterial() {
   return new THREE.ShaderMaterial({
@@ -126,6 +140,9 @@ function dropletMaterial() {
       uNoiseTex: { value: null },
       uTime: shared.uTime,
       uSeaColor: { value: new THREE.Color(0.012, 0.055, 0.095) },
+      // under one: steel returns a little less than everything, and the gap is
+      // most of what separates metal from glass
+      uReflectivity: { value: 0.86 },
       uCharge: { value: 0 },       // 0..1, flares while it is manoeuvring hard
     },
     vertexShader: /* glsl */`
@@ -145,7 +162,7 @@ function dropletMaterial() {
       ${SKY_SAMPLE_GLSL}
       ${CLOUD_GLSL}
 
-      uniform float uSunIntensity, uCharge;
+      uniform float uSunIntensity, uCharge, uReflectivity;
       uniform vec3 uSeaColor;
       varying vec3 vWorld;
       varying vec3 vNormal2;
@@ -155,12 +172,13 @@ function dropletMaterial() {
         vec3 V = normalize(uCameraPos - vWorld);
         if (dot(N, V) < 0.0) N = -N;
         vec3 R = reflect(-V, N);
+        float NoV = max(dot(N, V), 0.0);
 
-        vec3 col;
+        vec3 env;
         if (R.y > 0.0) {
-          col = skyRadiance(R);
-          vec4 cl = clouds(R, uSunDir, uSunColor, col);
-          col = mix(col, cl.rgb, cl.a);
+          env = skyRadiance(R);
+          vec4 cl = clouds(R, uSunDir, uSunColor, env);
+          env = mix(env, cl.rgb, cl.a);
         } else {
           // the ray goes into the sea, which sends most of it straight back up
           vec3 up = vec3(R.x, -R.y, R.z);
@@ -169,27 +187,47 @@ function dropletMaterial() {
           skyBack = mix(skyBack, cl.rgb, cl.a);
           float f = 0.02 + 0.98 * pow(1.0 - min(-R.y, 1.0), 5.0);
           vec3 water = uSeaColor * (uSunColor * uSunIntensity * 0.6 +
-                                    skyRadiance(vec3(0.0, 1.0, 0.0)) * 0.7) * 2.2;
-          col = mix(water, skyBack, f);
+                                    skyRadiance(vec3(0.0, 1.0, 0.0)) * 0.7) * 1.25;
+          env = mix(water, skyBack, f);
           // the sun's track on the water, smeared the way a real one is
           float glint = pow(max(dot(up, uSunDir), 0.0), 220.0);
-          col += uSunColor * uSunIntensity * glint * 3.5;
+          env += uSunColor * uSunIntensity * glint * 3.5;
         }
 
-        // The sun itself, as a mirror this good actually returns it: a hard
-        // point that blooms out along the curvature, not a soft roughness lobe.
-        float sun = pow(max(dot(R, uSunDir), 0.0), 3400.0);
-        col += uSunColor * uSunIntensity * sun * 340.0;
-        col += uSunColor * uSunIntensity * pow(max(dot(R, uSunDir), 0.0), 90.0) * 0.9;
+        // A trace of gloss. Polished steel is not a liquid mirror: it carries
+        // a lobe a few degrees wide, and mixing in the sky averaged toward the
+        // surface normal is that lobe for one extra table lookup.
+        env = mix(env, skyRadiance(normalize(mix(R, N, 0.55))), 0.10);
 
-        // A whisper of grazing lift, so the silhouette never goes flat against
-        // a bright sky. Metal has no Fresnel to speak of; this is the little
-        // that a curved one does show.
-        float graze = pow(1.0 - max(dot(N, V), 0.0), 4.0);
-        col *= 1.0 + graze * 0.35;
+        // Silver, with the faint warmth polished steel has. Schlick on a metal
+        // barely moves — F0 is already near one — but the little it does move
+        // is what keeps the rim brighter than the belly.
+        vec3 F0 = vec3(0.968, 0.947, 0.906);
+        vec3 F = F0 + (1.0 - F0) * pow(1.0 - NoV, 5.0);
+        vec3 col = env * F * uReflectivity;
+
+        // Half the chroma comes out. A true mirror under this sky is pale
+        // blue all over, which the eye reads as glass; steel keeps the shape
+        // of the reflection but not its colour.
+        col = mix(vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), col, 0.48);
+        col *= vec3(1.04, 1.005, 0.945);
+
+        // Steel lives on contrast — bright where it takes the sky, genuinely
+        // dark where it takes the sea. Pulling the chroma out closes that gap;
+        // a mild power curve is what opens it again, and without it the thing
+        // reads as matte porcelain rather than as something machined.
+        col = pow(max(col, 0.0), vec3(1.28)) * 1.36;
+
+        // The sun, which a surface this smooth genuinely returns: a hard point
+        // riding on a tighter-than-usual lobe, not a broad roughness smear.
+        float RoS = max(dot(R, uSunDir), 0.0);
+        col += uSunColor * uSunIntensity * pow(RoS, 2600.0) * 260.0;
+        col += uSunColor * uSunIntensity * pow(RoS, 140.0) * 1.1;
+        col += uSunColor * uSunIntensity * pow(RoS, 14.0) * 0.055;
 
         // and it lights up along its own axis when it is working
-        col += vec3(0.35, 0.62, 0.95) * uCharge * graze * 1.8;
+        float graze = pow(1.0 - NoV, 4.0);
+        col += vec3(0.35, 0.62, 0.95) * uCharge * graze * 1.6;
 
         col = applyAerial(col, vWorld);
         gl_FragColor = vec4(col, 1.0);
@@ -235,7 +273,7 @@ export class Droplet {
 
     // the eye rides just behind the tip, looking out along the axis
     this.helm = new THREE.Group();
-    this.helm.position.set(0, 0, LENGTH * 0.24);
+    this.helm.position.set(0, 0, LENGTH * 0.30);
     this.root.add(this.helm);
 
     this.shock = { x: 0, z: 0, r: 0, strength: 0 };
@@ -345,14 +383,23 @@ export class Droplet {
    * What the ocean shader needs: where the well is, how high it is being held,
    * and how hard. Returns null when the probe is not on station.
    */
-  writeOceanUniforms(uDroplet, uShock) {
+  writeOceanUniforms(uDroplet, uDropTrail, uShock) {
     if (!this.active) {
       uDroplet.value.set(0, 0, 999, 0);
+      uDropTrail.value.set(0, 1, 0);
     } else {
       const h = Math.max(0, this.position.y - this.seaLast);
       // it stops dishing the sea out once it is well clear of it
       const strength = clamp(1 - (h - 2) / 26, 0, 1) * (this.arriving > 0 ? 0.4 : 1);
       uDroplet.value.set(this.position.x, this.position.z, Math.min(h, 24), strength);
+      // the trench runs the way it came from, and the faster it is going the
+      // longer the water takes to fall back in behind it
+      const sign = this.surge >= 0 ? -1 : 1;
+      uDropTrail.value.set(
+        Math.sin(this.heading) * sign,
+        Math.cos(this.heading) * sign,
+        clamp(Math.abs(this.surge) * 1.35, 0, 260)
+      );
     }
     uShock.value.set(this.shock.x, this.shock.z, this.shock.r, this.shock.strength);
   }

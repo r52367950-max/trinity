@@ -146,6 +146,8 @@ export class Ocean {
       // the probe: centre.xz, hover height, strength — and the ring it throws
       // off when it stops dead
       uDroplet: { value: new THREE.Vector4(0, 0, 999, 0) },
+      // the direction the trench trails and how far it runs before it closes
+      uDropTrail: { value: new THREE.Vector3(0, 1, 0) },
       uShock: { value: new THREE.Vector4(0, 0, 0, 0) },
 
       uFoamAmount: { value: 1.0 },
@@ -180,6 +182,7 @@ export class Ocean {
       uniform vec3 uTerrainInfo;   // centre.x, centre.z, size
       uniform mat4 uReflMatrix;
       uniform vec4 uDroplet;       // centre.xz, hover height, strength
+      uniform vec3 uDropTrail;     // unit direction astern, trench length
 
       varying float vDropRim;
       varying vec3 vWorld;
@@ -220,18 +223,30 @@ export class Ocean {
         // is not air pressure — a metre-wide object does not dish out ten
         // metres of ocean — so it reads as force with no visible cause, which
         // is the point of the thing.
+        // The well is not a point but a *segment*: it starts under the probe
+        // and trails astern, so standing still it is a dish and at speed it is
+        // a trench with the sea held apart along both walls. The taper is what
+        // closes it again a couple of hundred metres back.
+        vec2 astern = uDropTrail.xy;
+        float along = clamp(dot(worldXZ - uDroplet.xy, astern), 0.0, uDropTrail.z);
+        vec2 spine = uDroplet.xy + astern * along;
+        vec2 toDrop = worldXZ - spine;
+        float lat = length(toDrop);
+        // the walls fall back together with distance behind
+        float taper = uDropTrail.z > 0.5 ? pow(1.0 - along / uDropTrail.z, 1.4) : 1.0;
+
         // scaled off the thing doing it: a three-metre object dishes out a
         // few metres of sea, not a crater you could park a ship in
-        vec2 toDrop = worldXZ - uDroplet.xy;
-        float dropR = 1.7 + uDroplet.z * 0.34;
-        float dropD = length(toDrop) / dropR;
+        float dropR = (1.7 + uDroplet.z * 0.34) * (0.75 + 0.25 * taper);
+        float dropD = lat / dropR;
         float well = exp(-dropD * dropD);
         float rim = exp(-pow((dropD - 1.70) / 0.58, 2.0));
-        disp.y -= uDroplet.w * (well * 1.55 - rim * 0.30);
-        vDropRim = uDroplet.w * rim;
+        float amp = uDroplet.w * taper;
+        disp.y -= amp * (well * 1.55 - rim * 0.30);
+        vDropRim = amp * rim;
         // tilt the normal to match, or the dish reads as a flat painted hole
-        float dhdr = -uDroplet.w * (-3.1 * dropD * well + 1.78 * (dropD - 1.70) * rim) / dropR;
-        vec2 radial = toDrop / (length(toDrop) + 1e-4);
+        float dhdr = -amp * (-3.1 * dropD * well + 1.78 * (dropD - 1.70) * rim) / dropR;
+        vec2 radial = toDrop / (lat + 1e-4);
         nrm = normalize(vec3(nrm.x - radial.x * dhdr, nrm.y, nrm.z - radial.y * dhdr));
 
         vec3 world = vec3(worldXZ.x + disp.x, disp.y, worldXZ.y + disp.z);

@@ -44,6 +44,14 @@ export class Input {
 
     // Drag fallback. Sandboxed iframes routinely refuse pointer lock, and
     // without this the player would be unable to look around at all.
+    // wheel drives the orbit camera's distance; one notch is a fixed ratio so
+    // it feels the same whether you are two metres out or two hundred
+    this.zoom = 0;
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      this.zoom += Math.sign(e.deltaY);
+    }, { passive: false });
+
     this.dragging = false;
     let dx = 0, dy = 0;
     canvas.addEventListener('mousedown', (e) => {
@@ -106,6 +114,9 @@ export class Input {
     canvas.addEventListener('pointercancel', end);
     canvas.style.touchAction = 'none';
   }
+
+  /** Wheel notches accumulated since the last call, then cleared. */
+  takeZoom() { const z = this.zoom; this.zoom = 0; return z; }
 
   /** True once per physical key press. */
   tapped(code) {

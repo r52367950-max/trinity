@@ -153,7 +153,7 @@
     <div><kbd>T</kbd> <b>自动调帆</b> · <kbd>V</kbd> <b>换船</b></div>
     <div><kbd>G</kbd> <b>召唤水滴</b> · <kbd>Q</kbd><kbd>E</kbd> <b>升降</b></div>
     <div><kbd>Space</kbd> <b>回正舵 / 空挡 / 急停</b></div>
-    <div><kbd>C</kbd> <b>视角</b> · <kbd>H</kbd> <b>隐藏</b></div>
+    <div><kbd>C</kbd> <b>视角</b> · 滚轮 <b>拉近拉远</b> · <kbd>H</kbd> <b>隐藏</b></div>
     <div><kbd>[</kbd><kbd>]</kbd> <b>时间</b> · <kbd>-</kbd><kbd>=</kbd> <b>风力</b></div>
     <div><kbd>F</kbd> <b>画质</b> · 鼠标拖动 <b>转头</b></div>
   </div>
@@ -1902,6 +1902,285 @@ function buildTown(scene) {
 return {makeBirds,buildTown};
 })();
 
+const __m_moorings = (function () {
+const THREE = __THREE;
+const {applyAtmosphere} = __m_materials;
+const {PROP_LAYER} = __m_layers;
+const {terrainHeight} = __m_terrain;
+const {sampleOcean} = __m_waves;
+const {mergeGeometries,prepare,trs,makeRng,clamp} = __m_utils;
+
+/**
+ * The rest of the bay: a working fleet on its moorings, pot buoys strung
+ * through the shallows, and a stack of rock standing offshore.
+ *
+ * Everything here rides the same wave function the player's hull does, so a
+ * swell rolling into the bay lifts the whole anchorage in sequence rather than
+ * leaving a row of boats pasted flat on a moving surface. Each hull is one
+ * merged mesh and every buoy is one instanced draw, because there are forty of
+ * them and they are worth almost nothing individually.
+ */
+
+const rng = makeRng(80531);
+
+/** A small workboat: chined hull, wheelhouse, mast, and a colour of her own. */
+function buildSmallHull(loa, beam, hullColor, trimColor) {
+  const NS = 22, NG = 8;
+  const pos = [], col = [], idx = [];
+  let base = 0;
+  const cH = new THREE.Color(hullColor);
+  const cT = new THREE.Color(trimColor);
+  const cDark = new THREE.Color(0x15202b);
+
+  const halfBeam = (t) => {
+    const s = Math.pow(Math.max(0, Math.sin(Math.PI * Math.pow(t, 0.62))), 0.5);
+    return (beam / 2) * Math.max(s, 0.5 * (1 - Math.min(1, t / 0.18)));
+  };
+  const depth = (t) => 0.26 + 0.34 * Math.pow(Math.max(0, Math.sin(Math.PI * Math.pow(t, 0.6))), 0.6);
+  const sheer = (t) => 0.52 + 0.40 * Math.pow(t, 2.3);
+
+  const grid = [];
+  for (let i = 0; i <= NS; i++) {
+    const t = i / NS;
+    const B = halfBeam(t), D = depth(t), S = sheer(t);
+    const row = [];
+    for (let j = 0; j <= NG; j++) {
+      const a = (j / NG) * Math.PI / 2;
+      const x = B * Math.pow(Math.sin(a), 0.7);
+      const y = -D * Math.pow(Math.cos(a), 1.6) + (S + D) * Math.pow(Math.sin(a), 2.2);
+      row.push([x, y, (t - 0.5) * loa + 0.2 * Math.max(0, y) * Math.max(0, t - 0.7)]);
+    }
+    grid.push(row);
+  }
+  const colorAt = (y, S) => (y < -0.02 ? cDark : S - y < 0.13 ? cT : cH);
+  const push = (x, y, z, c) => { pos.push(x, y, z); col.push(c.r, c.g, c.b); return base++; };
+
+  for (const side of [1, -1]) {
+    const start = base;
+    for (let i = 0; i <= NS; i++) {
+      const S = sheer(i / NS);
+      for (const [x, y, z] of grid[i]) push(x * side, y, z, colorAt(y, S));
+    }
+    for (let i = 0; i < NS; i++) {
+      for (let j = 0; j < NG; j++) {
+        const a = start + i * (NG + 1) + j;
+        if (side > 0) idx.push(a, a + 1, a + NG + 1, a + 1, a + NG + 2, a + NG + 1);
+        else idx.push(a, a + NG + 1, a + 1, a + 1, a + NG + 1, a + NG + 2);
+      }
+    }
+  }
+  // transom
+  {
+    const start = base;
+    const S = sheer(0);
+    for (const [x, y, z] of grid[0]) {
+      const c = colorAt(y, S);
+      push(x, y, z, c); push(-x, y, z, c);
+    }
+    for (let j = 0; j < NG; j++) {
+      const s0 = start + j * 2;
+      idx.push(s0, s0 + 1, s0 + 2, s0 + 1, s0 + 3, s0 + 2);
+    }
+  }
+  // deck
+  {
+    const start = base;
+    const NW = 5;
+    for (let i = 0; i <= NS; i++) {
+      const t = i / NS;
+      const [ox, oy, oz] = grid[i][NG];
+      for (let j = 0; j <= NW; j++) {
+        const f = (j / NW) * 2 - 1;
+        push(ox * f, oy - 0.02 + (1 - f * f) * 0.05, oz, cT);
+      }
+    }
+    for (let i = 0; i < NS; i++) {
+      for (let j = 0; j < NW; j++) {
+        const a = start + i * (NW + 1) + j;
+        idx.push(a, a + (NW + 1), a + 1, a + 1, a + (NW + 1), a + NW + 2);
+      }
+    }
+  }
+
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(col), 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+function keepColors(geometry, matrix) {
+  const g = geometry.index ? geometry.toNonIndexed() : geometry.clone();
+  if (matrix) g.applyMatrix4(matrix);
+  if (!g.getAttribute('uv')) {
+    g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(g.getAttribute('position').count * 2), 2));
+  }
+  g.deleteAttribute('tangent');
+  return g;
+}
+
+const FLEET = [
+  { loa: 7.6, beam: 2.6, hull: 0x2f6f8c, trim: 0xe8e4da, house: 0xe8e4da, kind: 'trawler' },
+  { loa: 6.4, beam: 2.2, hull: 0xb8433a, trim: 0xefeae0, house: 0xefeae0, kind: 'launch' },
+  { loa: 8.4, beam: 2.9, hull: 0x1f4030, trim: 0xd9d3c4, house: 0xd9d3c4, kind: 'trawler' },
+  { loa: 5.6, beam: 2.0, hull: 0xe0dbcf, trim: 0x3a5a72, house: 0x3a5a72, kind: 'open' },
+  { loa: 7.0, beam: 2.4, hull: 0xd9a53c, trim: 0xefeae0, house: 0xefeae0, kind: 'launch' },
+  { loa: 6.0, beam: 2.1, hull: 0x37516b, trim: 0xe6e1d6, house: 0xe6e1d6, kind: 'open' },
+];
+
+function buildFleetBoat(spec) {
+  const parts = [];
+  const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+  const cyl = (rt, rb, h, s = 8) => new THREE.CylinderGeometry(rt, rb, h, s);
+  const L = spec.loa;
+
+  parts.push(keepColors(buildSmallHull(L, spec.beam, spec.hull, spec.trim)));
+
+  if (spec.kind !== 'open') {
+    // wheelhouse, set aft, with a dark screen band
+    const hw = spec.beam * 0.52, hh = 0.95, hz = -L * 0.16;
+    parts.push(prepare(box(hw, hh, L * 0.26), trs(0, 0.98, hz), spec.house));
+    parts.push(prepare(box(hw * 0.94, 0.26, L * 0.262), trs(0, 1.24, hz), 0x1a2028));
+    parts.push(prepare(box(hw + 0.10, 0.07, L * 0.28), trs(0, 1.48, hz), spec.house));
+    parts.push(prepare(cyl(0.035, 0.045, 1.1), trs(0, 2.05, hz), 0xb9bcc0));
+  }
+  // mast and boom, the derrick every working boat carries
+  parts.push(prepare(cyl(0.05, 0.07, 3.4), trs(0, 2.10, L * 0.10), 0xb0743e));
+  parts.push(prepare(cyl(0.035, 0.045, 1.9), trs(0, 3.20, L * 0.10 - 0.60, 0.62, 0, 0), 0xb0743e));
+  // a couple of pot floats and a tyre fender or two on deck
+  for (let i = 0; i < 3; i++) {
+    parts.push(prepare(new THREE.SphereGeometry(0.16, 7, 5),
+      trs((rng() - 0.5) * spec.beam * 0.5, 0.72, -L * 0.34 + i * 0.5), i % 2 ? 0xe0642c : 0xe8e2d4));
+  }
+  for (const s of [1, -1]) {
+    parts.push(prepare(new THREE.TorusGeometry(0.20, 0.07, 5, 9),
+      trs(s * spec.beam * 0.50, 0.34, L * 0.06, 0, Math.PI / 2, 0), 0x25282c));
+  }
+  return mergeGeometries(parts);
+}
+
+/**
+ * Everything that floats but is not sailed. Returns an update(time) to be
+ * called once a frame.
+ */
+function buildMoorings(scene, { jettyEnd, jettyDir } = {}) {
+  const mat = applyAtmosphere(new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.66, metalness: 0.05,
+  }));
+  const buoyMat = applyAtmosphere(new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.55,
+  }));
+
+  const floats = [];
+
+  // ---- the fleet, strung along the sheltered water behind the harbour arm ----
+  const anchor = jettyEnd ? new THREE.Vector2(jettyEnd.x, jettyEnd.y) : new THREE.Vector2(0, 60);
+  const along = jettyDir ? new THREE.Vector2(-jettyDir.y, jettyDir.x) : new THREE.Vector2(1, 0);
+  const out = jettyDir ? new THREE.Vector2(jettyDir.x, jettyDir.y) : new THREE.Vector2(0, 1);
+
+  FLEET.forEach((spec, i) => {
+    const lane = i % 2;
+    const t = (i - FLEET.length / 2) * 17 + (rng() - 0.5) * 7;
+    const off = 16 + lane * 21 + rng() * 6;
+    const px = anchor.x + along.x * t + out.x * off;
+    const pz = anchor.y + along.y * t + out.y * off;
+    // never leave one sitting on the bottom
+    if (terrainHeight(px, pz) > -2.4) return;
+
+    const g = new THREE.Group();
+    const mesh = new THREE.Mesh(buildFleetBoat(spec), mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    g.add(mesh);
+    g.position.set(px, 0, pz);
+    // moored boats lie to the wind, near enough
+    g.rotation.y = 0.9 + (rng() - 0.5) * 0.5;
+    scene.add(g);
+    floats.push({ group: g, x: px, z: pz, len: spec.loa, roll: 0.4 + rng() * 0.5, phase: rng() * 9 });
+  });
+
+  // ---- pot buoys: one instanced draw for the lot ----
+  const buoyGeo = mergeGeometries([
+    prepare(new THREE.SphereGeometry(0.24, 9, 7), trs(0, 0.06, 0), 0xffffff),
+    prepare(new THREE.CylinderGeometry(0.035, 0.035, 0.9, 6), trs(0, 0.52, 0), 0x2a2d33),
+    prepare(new THREE.BoxGeometry(0.20, 0.14, 0.02), trs(0, 0.92, 0), 0xffffff),
+  ]);
+  const spots = [];
+  for (let i = 0; i < 120 && spots.length < 44; i++) {
+    const a = rng() * Math.PI * 2;
+    const r = 120 + rng() * 620;
+    const x = Math.sin(a) * r;
+    const z = 60 - Math.cos(a) * r * 0.55;
+    const d = -terrainHeight(x, z);
+    if (d < 6 || d > 46) continue;             // pots go on the shelf, not the deep
+    spots.push([x, z, rng()]);
+  }
+  const buoys = new THREE.InstancedMesh(buoyGeo, buoyMat, spots.length);
+  buoys.castShadow = false;
+  buoys.frustumCulled = false;
+  buoys.layers.set(PROP_LAYER);                // too small to matter in the mirror
+  buoys.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(spots.length * 3), 3);
+  const tint = new THREE.Color();
+  spots.forEach(([, , h], i) => {
+    tint.setHSL(h < 0.5 ? 0.06 + h * 0.06 : 0.14 + h * 0.02, 0.75, 0.52);
+    buoys.setColorAt(i, tint);
+  });
+  scene.add(buoys);
+
+  // ---- an offshore stack, because an empty horizon is a wasted one ----
+  {
+    const parts = [];
+    const base = new THREE.Vector2(-430, 210);
+    for (let i = 0; i < 9; i++) {
+      const a = rng() * Math.PI * 2;
+      const r = rng() * 26;
+      const h = 6 + rng() * 26;
+      const w = 5 + rng() * 13;
+      parts.push(prepare(
+        new THREE.ConeGeometry(w, h, 5 + Math.floor(rng() * 3), 1),
+        trs(Math.sin(a) * r, h * 0.5 - 5, Math.cos(a) * r,
+          (rng() - 0.5) * 0.2, rng() * 3, (rng() - 0.5) * 0.2),
+        i % 3 === 0 ? 0x6b6459 : i % 3 === 1 ? 0x5a5750 : 0x77705f));
+    }
+    const stack = new THREE.Mesh(mergeGeometries(parts),
+      applyAtmosphere(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 })));
+    stack.position.set(base.x, 0, base.y);
+    stack.castShadow = true;
+    stack.receiveShadow = true;
+    scene.add(stack);
+  }
+
+  const s = { y: 0, normal: new THREE.Vector3(), fold: 1 };
+  const dummy = new THREE.Object3D();
+
+  return function updateMoorings(time) {
+    for (const f of floats) {
+      sampleOcean(f.x, f.z, time, s);
+      f.group.position.y = s.y - 0.06;
+      // moored boats snub about on their chains rather than lying still
+      f.group.rotation.z = Math.atan2(s.normal.x, s.normal.y) * f.roll;
+      f.group.rotation.x = -Math.atan2(s.normal.z, s.normal.y) * f.roll * 0.7;
+    }
+    for (let i = 0; i < spots.length; i++) {
+      const [x, z, h] = spots[i];
+      sampleOcean(x, z, time, s);
+      dummy.position.set(x, s.y - 0.14, z);
+      dummy.rotation.set(
+        -Math.atan2(s.normal.z, s.normal.y) * 0.9,
+        h * 6.2,
+        Math.atan2(s.normal.x, s.normal.y) * 0.9
+      );
+      dummy.updateMatrix();
+      buoys.setMatrixAt(i, dummy.matrix);
+    }
+    buoys.instanceMatrix.needsUpdate = true;
+  };
+}
+
+return {buildMoorings};
+})();
+
 const __m_ocean = (function () {
 const THREE = __THREE;
 const {shared} = __m_shared;
@@ -2051,6 +2330,8 @@ class Ocean {
       // the probe: centre.xz, hover height, strength — and the ring it throws
       // off when it stops dead
       uDroplet: { value: new THREE.Vector4(0, 0, 999, 0) },
+      // the direction the trench trails and how far it runs before it closes
+      uDropTrail: { value: new THREE.Vector3(0, 1, 0) },
       uShock: { value: new THREE.Vector4(0, 0, 0, 0) },
 
       uFoamAmount: { value: 1.0 },
@@ -2085,6 +2366,7 @@ class Ocean {
       uniform vec3 uTerrainInfo;   // centre.x, centre.z, size
       uniform mat4 uReflMatrix;
       uniform vec4 uDroplet;       // centre.xz, hover height, strength
+      uniform vec3 uDropTrail;     // unit direction astern, trench length
 
       varying float vDropRim;
       varying vec3 vWorld;
@@ -2125,18 +2407,30 @@ class Ocean {
         // is not air pressure — a metre-wide object does not dish out ten
         // metres of ocean — so it reads as force with no visible cause, which
         // is the point of the thing.
+        // The well is not a point but a *segment*: it starts under the probe
+        // and trails astern, so standing still it is a dish and at speed it is
+        // a trench with the sea held apart along both walls. The taper is what
+        // closes it again a couple of hundred metres back.
+        vec2 astern = uDropTrail.xy;
+        float along = clamp(dot(worldXZ - uDroplet.xy, astern), 0.0, uDropTrail.z);
+        vec2 spine = uDroplet.xy + astern * along;
+        vec2 toDrop = worldXZ - spine;
+        float lat = length(toDrop);
+        // the walls fall back together with distance behind
+        float taper = uDropTrail.z > 0.5 ? pow(1.0 - along / uDropTrail.z, 1.4) : 1.0;
+
         // scaled off the thing doing it: a three-metre object dishes out a
         // few metres of sea, not a crater you could park a ship in
-        vec2 toDrop = worldXZ - uDroplet.xy;
-        float dropR = 1.7 + uDroplet.z * 0.34;
-        float dropD = length(toDrop) / dropR;
+        float dropR = (1.7 + uDroplet.z * 0.34) * (0.75 + 0.25 * taper);
+        float dropD = lat / dropR;
         float well = exp(-dropD * dropD);
         float rim = exp(-pow((dropD - 1.70) / 0.58, 2.0));
-        disp.y -= uDroplet.w * (well * 1.55 - rim * 0.30);
-        vDropRim = uDroplet.w * rim;
+        float amp = uDroplet.w * taper;
+        disp.y -= amp * (well * 1.55 - rim * 0.30);
+        vDropRim = amp * rim;
         // tilt the normal to match, or the dish reads as a flat painted hole
-        float dhdr = -uDroplet.w * (-3.1 * dropD * well + 1.78 * (dropD - 1.70) * rim) / dropR;
-        vec2 radial = toDrop / (length(toDrop) + 1e-4);
+        float dhdr = -amp * (-3.1 * dropD * well + 1.78 * (dropD - 1.70) * rim) / dropR;
+        vec2 radial = toDrop / (lat + 1e-4);
         nrm = normalize(vec3(nrm.x - radial.x * dhdr, nrm.y, nrm.z - radial.y * dhdr));
 
         vec3 world = vec3(worldXZ.x + disp.x, disp.y, worldXZ.y + disp.z);
@@ -4355,7 +4649,9 @@ function dropRadius(u) {
 }
 
 function buildDroplet(length = LENGTH, maxDiameter = 1.55) {
-  const NU = 132, NV = 72;
+  // A mirror shows its own silhouette more honestly than anything else in the
+  // scene does, so this is worth the triangles.
+  const NU = 180, NV = 96;
   // normalise so the widest section is exactly maxDiameter across
   const uMax = Math.sqrt(PROFILE_A / (PROFILE_A + 1));
   const scale = (maxDiameter / 2) / dropRadius(uMax);
@@ -4365,11 +4661,13 @@ function buildDroplet(length = LENGTH, maxDiameter = 1.55) {
   const idx = [];
   let k = 0;
   for (let i = 0; i <= NU; i++) {
-    // bunch the rings toward the tip, where all the curvature is
-    const u = Math.pow(i / NU, 1.35);
+    // cosine spacing: rings bunch at both poles, which is where all the
+    // curvature is and where a mirror shows faceting first
+    const u = 0.5 - 0.5 * Math.cos(Math.PI * (i / NU));
     const r = dropRadius(u) * scale;
-    // the tip points along +Z, so the thing flies the way it is pointing
-    const z = (0.5 - u) * length;
+    // The bulb leads and the needle trails — which is how the thing flies in
+    // the book, and it is also the better silhouette head-on.
+    const z = (u - 0.5) * length;
     for (let j = 0; j <= NV; j++) {
       const a = (j / NV) * Math.PI * 2;
       pos[k] = Math.cos(a) * r;
@@ -4390,10 +4688,14 @@ function buildDroplet(length = LENGTH, maxDiameter = 1.55) {
   g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
   g.setIndex(idx);
   g.computeVertexNormals();
-  // the tip is a singular point and averaging around it gives garbage; aim it
-  // straight down the axis instead
+  // both ends are singular points, and averaging around a zero-radius ring
+  // gives garbage; aim them straight down the axis instead
   const n = g.getAttribute('normal');
-  for (let j = 0; j <= NV; j++) n.setXYZ(j, 0, 0, 1);
+  const last = NU * (NV + 1);
+  for (let j = 0; j <= NV; j++) {
+    n.setXYZ(j, 0, 0, -1);            // the needle, trailing
+    n.setXYZ(last + j, 0, 0, 1);      // the bulb, leading
+  }
   n.needsUpdate = true;
   g.computeBoundingSphere();
   return g;
@@ -4404,7 +4706,7 @@ function buildDroplet(length = LENGTH, maxDiameter = 1.55) {
 // ---------------------------------------------------------------------------
 
 /**
- * A perfect mirror, evaluated analytically rather than from a cube map.
+ * Polished steel, evaluated analytically rather than from a cube map.
  *
  * Every reflected ray goes to one of two places. Up, and it is the same
  * scattering table the sky dome and the ocean use, so the probe agrees with
@@ -4413,6 +4715,12 @@ function buildDroplet(length = LENGTH, maxDiameter = 1.55) {
  * the water's own colour, plus whatever the sun is doing on it. Two lookups
  * and no render targets, and it is *more* correct at the horizon than a
  * 256-pixel cube would be.
+ *
+ * What comes back then gets treated as *metal* rather than as a soap bubble.
+ * A perfect mirror under this sky is mostly pale blue, which reads as glass;
+ * a silver Fresnel term, a reflectivity under one, and pulling half the
+ * chroma out of the reflection is what turns it into something you would
+ * believe was machined.
  */
 function dropletMaterial() {
   return new THREE.ShaderMaterial({
@@ -4429,6 +4737,9 @@ function dropletMaterial() {
       uNoiseTex: { value: null },
       uTime: shared.uTime,
       uSeaColor: { value: new THREE.Color(0.012, 0.055, 0.095) },
+      // under one: steel returns a little less than everything, and the gap is
+      // most of what separates metal from glass
+      uReflectivity: { value: 0.86 },
       uCharge: { value: 0 },       // 0..1, flares while it is manoeuvring hard
     },
     vertexShader: /* glsl */`
@@ -4448,7 +4759,7 @@ function dropletMaterial() {
       ${SKY_SAMPLE_GLSL}
       ${CLOUD_GLSL}
 
-      uniform float uSunIntensity, uCharge;
+      uniform float uSunIntensity, uCharge, uReflectivity;
       uniform vec3 uSeaColor;
       varying vec3 vWorld;
       varying vec3 vNormal2;
@@ -4458,12 +4769,13 @@ function dropletMaterial() {
         vec3 V = normalize(uCameraPos - vWorld);
         if (dot(N, V) < 0.0) N = -N;
         vec3 R = reflect(-V, N);
+        float NoV = max(dot(N, V), 0.0);
 
-        vec3 col;
+        vec3 env;
         if (R.y > 0.0) {
-          col = skyRadiance(R);
-          vec4 cl = clouds(R, uSunDir, uSunColor, col);
-          col = mix(col, cl.rgb, cl.a);
+          env = skyRadiance(R);
+          vec4 cl = clouds(R, uSunDir, uSunColor, env);
+          env = mix(env, cl.rgb, cl.a);
         } else {
           // the ray goes into the sea, which sends most of it straight back up
           vec3 up = vec3(R.x, -R.y, R.z);
@@ -4472,27 +4784,47 @@ function dropletMaterial() {
           skyBack = mix(skyBack, cl.rgb, cl.a);
           float f = 0.02 + 0.98 * pow(1.0 - min(-R.y, 1.0), 5.0);
           vec3 water = uSeaColor * (uSunColor * uSunIntensity * 0.6 +
-                                    skyRadiance(vec3(0.0, 1.0, 0.0)) * 0.7) * 2.2;
-          col = mix(water, skyBack, f);
+                                    skyRadiance(vec3(0.0, 1.0, 0.0)) * 0.7) * 1.25;
+          env = mix(water, skyBack, f);
           // the sun's track on the water, smeared the way a real one is
           float glint = pow(max(dot(up, uSunDir), 0.0), 220.0);
-          col += uSunColor * uSunIntensity * glint * 3.5;
+          env += uSunColor * uSunIntensity * glint * 3.5;
         }
 
-        // The sun itself, as a mirror this good actually returns it: a hard
-        // point that blooms out along the curvature, not a soft roughness lobe.
-        float sun = pow(max(dot(R, uSunDir), 0.0), 3400.0);
-        col += uSunColor * uSunIntensity * sun * 340.0;
-        col += uSunColor * uSunIntensity * pow(max(dot(R, uSunDir), 0.0), 90.0) * 0.9;
+        // A trace of gloss. Polished steel is not a liquid mirror: it carries
+        // a lobe a few degrees wide, and mixing in the sky averaged toward the
+        // surface normal is that lobe for one extra table lookup.
+        env = mix(env, skyRadiance(normalize(mix(R, N, 0.55))), 0.10);
 
-        // A whisper of grazing lift, so the silhouette never goes flat against
-        // a bright sky. Metal has no Fresnel to speak of; this is the little
-        // that a curved one does show.
-        float graze = pow(1.0 - max(dot(N, V), 0.0), 4.0);
-        col *= 1.0 + graze * 0.35;
+        // Silver, with the faint warmth polished steel has. Schlick on a metal
+        // barely moves — F0 is already near one — but the little it does move
+        // is what keeps the rim brighter than the belly.
+        vec3 F0 = vec3(0.968, 0.947, 0.906);
+        vec3 F = F0 + (1.0 - F0) * pow(1.0 - NoV, 5.0);
+        vec3 col = env * F * uReflectivity;
+
+        // Half the chroma comes out. A true mirror under this sky is pale
+        // blue all over, which the eye reads as glass; steel keeps the shape
+        // of the reflection but not its colour.
+        col = mix(vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), col, 0.48);
+        col *= vec3(1.04, 1.005, 0.945);
+
+        // Steel lives on contrast — bright where it takes the sky, genuinely
+        // dark where it takes the sea. Pulling the chroma out closes that gap;
+        // a mild power curve is what opens it again, and without it the thing
+        // reads as matte porcelain rather than as something machined.
+        col = pow(max(col, 0.0), vec3(1.28)) * 1.36;
+
+        // The sun, which a surface this smooth genuinely returns: a hard point
+        // riding on a tighter-than-usual lobe, not a broad roughness smear.
+        float RoS = max(dot(R, uSunDir), 0.0);
+        col += uSunColor * uSunIntensity * pow(RoS, 2600.0) * 260.0;
+        col += uSunColor * uSunIntensity * pow(RoS, 140.0) * 1.1;
+        col += uSunColor * uSunIntensity * pow(RoS, 14.0) * 0.055;
 
         // and it lights up along its own axis when it is working
-        col += vec3(0.35, 0.62, 0.95) * uCharge * graze * 1.8;
+        float graze = pow(1.0 - NoV, 4.0);
+        col += vec3(0.35, 0.62, 0.95) * uCharge * graze * 1.6;
 
         col = applyAerial(col, vWorld);
         gl_FragColor = vec4(col, 1.0);
@@ -4538,7 +4870,7 @@ class Droplet {
 
     // the eye rides just behind the tip, looking out along the axis
     this.helm = new THREE.Group();
-    this.helm.position.set(0, 0, LENGTH * 0.24);
+    this.helm.position.set(0, 0, LENGTH * 0.30);
     this.root.add(this.helm);
 
     this.shock = { x: 0, z: 0, r: 0, strength: 0 };
@@ -4648,14 +4980,23 @@ class Droplet {
    * What the ocean shader needs: where the well is, how high it is being held,
    * and how hard. Returns null when the probe is not on station.
    */
-  writeOceanUniforms(uDroplet, uShock) {
+  writeOceanUniforms(uDroplet, uDropTrail, uShock) {
     if (!this.active) {
       uDroplet.value.set(0, 0, 999, 0);
+      uDropTrail.value.set(0, 1, 0);
     } else {
       const h = Math.max(0, this.position.y - this.seaLast);
       // it stops dishing the sea out once it is well clear of it
       const strength = clamp(1 - (h - 2) / 26, 0, 1) * (this.arriving > 0 ? 0.4 : 1);
       uDroplet.value.set(this.position.x, this.position.z, Math.min(h, 24), strength);
+      // the trench runs the way it came from, and the faster it is going the
+      // longer the water takes to fall back in behind it
+      const sign = this.surge >= 0 ? -1 : 1;
+      uDropTrail.value.set(
+        Math.sin(this.heading) * sign,
+        Math.cos(this.heading) * sign,
+        clamp(Math.abs(this.surge) * 1.35, 0, 260)
+      );
     }
     uShock.value.set(this.shock.x, this.shock.z, this.shock.r, this.shock.strength);
   }
@@ -5558,6 +5899,14 @@ class Input {
 
     // Drag fallback. Sandboxed iframes routinely refuse pointer lock, and
     // without this the player would be unable to look around at all.
+    // wheel drives the orbit camera's distance; one notch is a fixed ratio so
+    // it feels the same whether you are two metres out or two hundred
+    this.zoom = 0;
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      this.zoom += Math.sign(e.deltaY);
+    }, { passive: false });
+
     this.dragging = false;
     let dx = 0, dy = 0;
     canvas.addEventListener('mousedown', (e) => {
@@ -5621,6 +5970,9 @@ class Input {
     canvas.style.touchAction = 'none';
   }
 
+  /** Wheel notches accumulated since the last call, then cleared. */
+  takeZoom() { const z = this.zoom; this.zoom = 0; return z; }
+
   /** True once per physical key press. */
   tapped(code) {
     const n = this._taps.get(code) || 0;
@@ -5658,6 +6010,7 @@ const {Sky} = __m_atmosphere;
 const {Terrain,waterDepthAt,terrainHeight,ISLAND} = __m_terrain;
 const {PROP_LAYER} = __m_layers;
 const {buildTown,makeBirds} = __m_town;
+const {buildMoorings} = __m_moorings;
 const {Ocean} = __m_ocean;
 const {Wake} = __m_wake;
 const {Boat,LIVERIES} = __m_boat;
@@ -5692,12 +6045,9 @@ const camera = new THREE.PerspectiveCamera(57, 2, 0.15, 30000);
 
 const state = {
   time: 0,
-  vessel: 'sail',      // which helm you are standing at: 'sail' or 'power'
-  chase: false,
-  // where the chase camera sits, in boat-relative polar coordinates
-  chaseAngle: 2.6,
-  chaseDist: 15,
-  chaseHeight: 6.2,
+  vessel: 'sail',      // which helm you are standing at: sail / power / drop
+  view: 'helm',        // helm / orbit / flyby
+  orbitDist: 16,
   quality: 1,
   sunAzimuth: 1.95,
   sunElevation: 0.42,
@@ -5710,7 +6060,7 @@ const state = {
   paused: true,
 };
 
-let sky, terrain, ocean, wake, boat, post, hud, input, town, birds;
+let sky, terrain, ocean, wake, boat, post, hud, input, town, birds, moorings;
 let rival, rivalWake, skipper;
 let power, powerWake, powerWakeIdle = 99;
 let droplet, dropWake, dropWakeIdle = 99;
@@ -5757,6 +6107,7 @@ async function boot() {
 
   town = await step(80, 'Building the town…', () => buildTown(scene));
   birds = makeBirds(scene);
+  moorings = await step(86, 'Mooring the fleet…', () => buildMoorings(scene, town));
 
   await step(90, 'Flooding the bay…', () => {
     configureWaves(state.wind.from, state.wind.speed);
@@ -5914,30 +6265,66 @@ const qBoat = new THREE.Quaternion();
 const qYaw = new THREE.Quaternion();
 const qPitch = new THREE.Quaternion();
 const eBoat = new THREE.Euler(0, 0, 0, 'YXZ');
-const chasePos = new THREE.Vector3(0, 6, 320);
-const chaseAim = new THREE.Vector3();
+const camAim = new THREE.Vector3(0, 3, 280);
+const flyAnchor = new THREE.Vector3();
 const tmp = new THREE.Vector3();
 const heading2 = new THREE.Vector2();
+let flyValid = false;
 
 /** Whichever helm you are standing at. */
 function helmed() {
   return state.vessel === 'power' ? power : state.vessel === 'drop' ? droplet : boat;
 }
 
+const VIEWS = ['helm', 'orbit', 'flyby'];
+const VIEW_NAMES = { helm: 'At the helm', orbit: 'Orbit — drag to swing, wheel to zoom', flyby: 'Fly-by' };
+
 function updateCamera(dt) {
   const v = helmed();
   v.root.updateMatrixWorld(true);
+  camera.up.set(0, 1, 0);
 
-  if (state.chase) {
-    const a = v.heading + state.chaseAngle;
-    const off = tmp.set(Math.sin(a) * state.chaseDist, state.chaseHeight, Math.cos(a) * state.chaseDist);
-    chasePos.lerp(off.add(v.position), 1 - Math.exp(-dt * 2.6));
-    // aim at the middle of whatever it is following — a mast height above a
-    // three-metre probe puts it off the bottom of the frame
-    chaseAim.lerp(tmp.copy(v.position).setY(v.position.y + (v.chaseAim ?? 3.4)), 1 - Math.exp(-dt * 5));
-    camera.position.copy(chasePos);
-    camera.up.set(0, 1, 0);
-    camera.lookAt(chaseAim);
+  // the point every external view looks at: the middle of the thing, not a
+  // mast height above it
+  const aimY = v.position.y + (v.chaseAim ?? 3.4);
+  camAim.lerp(tmp.set(v.position.x, aimY, v.position.z), 1 - Math.exp(-dt * 14));
+
+  if (state.view === 'orbit') {
+    // Placed, not chased. The old camera lerped toward a moving offset in
+    // world space, which is fine at six knots and hopeless at two hundred and
+    // eighty — it simply never caught up. Anchoring the offset to the vessel
+    // means it cannot fall behind at any speed, and the only smoothing left is
+    // on the aim point.
+    const a = v.heading + Math.PI + input.lookYaw;
+    const p = clamp(input.lookPitch + 0.16, -1.15, 1.30);
+    const d = state.orbitDist;
+    const flat = Math.cos(p) * d;
+    camera.position.set(
+      camAim.x + Math.sin(a) * flat,
+      Math.max(camAim.y + Math.sin(p) * d, sampleSeaY(v) + 0.6),
+      camAim.z + Math.cos(a) * flat
+    );
+    camera.lookAt(camAim);
+    return;
+  }
+
+  if (state.view === 'flyby') {
+    // A fixed point in the world that the vessel goes past, re-anchored ahead
+    // of it whenever it gets away. Nothing else shows you three hundred knots
+    // for what it is.
+    const away = flyAnchor.distanceTo(v.position);
+    if (!flyValid || away > 260 || away < 12) {
+      const lead = Math.max(45, Math.min(210, v.speed * 1.6));
+      const side = (Math.random() < 0.5 ? 1 : -1) * (18 + Math.random() * 40);
+      flyAnchor.set(
+        v.position.x + Math.sin(v.heading) * lead + Math.cos(v.heading) * side,
+        Math.max(2.5, v.position.y + 1.5 + Math.random() * 14),
+        v.position.z + Math.cos(v.heading) * lead - Math.sin(v.heading) * side
+      );
+      flyValid = true;
+    }
+    camera.position.copy(flyAnchor);
+    camera.lookAt(camAim);
     return;
   }
 
@@ -5951,6 +6338,29 @@ function updateCamera(dt) {
   qYaw.setFromAxisAngle(UP, input.lookYaw);
   qPitch.setFromAxisAngle(RIGHT, input.lookPitch);
   camera.quaternion.copy(qBoat).multiply(qYaw).multiply(qPitch);
+}
+
+const _seaProbe = { y: 0, normal: new THREE.Vector3(), fold: 1 };
+function sampleSeaY(v) {
+  sampleOcean(v.position.x, v.position.z, state.time, _seaProbe);
+  return _seaProbe.y;
+}
+
+function setView(next, quiet = false) {
+  state.view = next;
+  flyValid = false;
+  if (next === 'orbit') {
+    // Open on a quarter view rather than dead astern. Astern of a boat is her
+    // transom and astern of the probe is a point aimed at your eye; three
+    // quarters is where either of them actually has a profile.
+    input.lookYaw = 0.62;
+    input.lookPitch = 0.05;
+    state.orbitDist = state.vessel === 'drop' ? 9 : state.vessel === 'power' ? 14 : 20;
+  } else if (next === 'helm') {
+    input.lookYaw = 0;
+    input.lookPitch = -0.03;
+  }
+  if (!quiet) hud.toast(VIEW_NAMES[next]);
 }
 
 // ---------------------------------------------------------------------------
@@ -6090,8 +6500,11 @@ function needsRefraction() {
 
 function hotkeys() {
   if (input.tapped('KeyC')) {
-    state.chase = !state.chase;
-    hud.toast(state.chase ? 'Chase camera' : 'At the helm');
+    setView(VIEWS[(VIEWS.indexOf(state.view) + 1) % VIEWS.length]);
+  }
+  const z = input.takeZoom();
+  if (z && state.view === 'orbit') {
+    state.orbitDist = clamp(state.orbitDist * Math.pow(1.16, z), 3.5, 400);
   }
   if (input.tapped('KeyT') && state.vessel === 'sail') {
     boat.autoTrim = !boat.autoTrim;
@@ -6163,8 +6576,9 @@ function boardNearest() {
     return;
   }
   state.vessel = best;
-  input.lookYaw = 0;
-  input.lookPitch = -0.03;
+  // there is nothing to look at from inside the probe, so it opens on the
+  // outside view; the boats have decks worth standing on
+  setView(best === 'drop' ? 'orbit' : 'helm', true);
   hud.toast(VESSELS[best].hint());
 }
 
@@ -6225,6 +6639,7 @@ function loop(now) {
     updateCourse(dt);
     updateCamera(dt);
     birds(state.time);
+    moorings(state.time);
     renderScene(dt, state.time);
     return;
   }
@@ -6269,7 +6684,8 @@ function loop(now) {
   power.updateVisual(dt, t);
   droplet.cacheSea(t);
   droplet.updateVisual(dt, t);
-  droplet.writeOceanUniforms(ocean.uniforms.uDroplet, ocean.uniforms.uShock);
+  droplet.writeOceanUniforms(ocean.uniforms.uDroplet, ocean.uniforms.uDropTrail,
+    ocean.uniforms.uShock);
 
   heading2.set(Math.sin(boat.heading), Math.cos(boat.heading));
   wake.update(dt, boat.position, heading2, Math.abs(boat.surge), 9.5);
@@ -6301,6 +6717,7 @@ function loop(now) {
   updateCourse(dt);
   updateCamera(dt);
   birds(t);
+  moorings(t);
 
   renderScene(dt, t, powerTrail, dropTrail);
 
@@ -6377,7 +6794,7 @@ window.__leeward = { get scene() { return scene; }, get renderer() { return rend
 
 boot();
 
-return {};
+return {VIEWS};
 })();
 
 </script>

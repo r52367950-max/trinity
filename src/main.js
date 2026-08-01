@@ -5,6 +5,7 @@ import { Sky } from './atmosphere.js';
 import { Terrain, waterDepthAt, terrainHeight, ISLAND } from './terrain.js';
 import { PROP_LAYER } from './layers.js';
 import { buildTown, makeBirds } from './town.js';
+import { buildMoorings } from './moorings.js';
 import { Ocean } from './ocean.js';
 import { Wake } from './wake.js';
 import { Boat, LIVERIES } from './boat.js';
@@ -39,12 +40,9 @@ const camera = new THREE.PerspectiveCamera(57, 2, 0.15, 30000);
 
 const state = {
   time: 0,
-  vessel: 'sail',      // which helm you are standing at: 'sail' or 'power'
-  chase: false,
-  // where the chase camera sits, in boat-relative polar coordinates
-  chaseAngle: 2.6,
-  chaseDist: 15,
-  chaseHeight: 6.2,
+  vessel: 'sail',      // which helm you are standing at: sail / power / drop
+  view: 'helm',        // helm / orbit / flyby
+  orbitDist: 16,
   quality: 1,
   sunAzimuth: 1.95,
   sunElevation: 0.42,
@@ -57,7 +55,7 @@ const state = {
   paused: true,
 };
 
-let sky, terrain, ocean, wake, boat, post, hud, input, town, birds;
+let sky, terrain, ocean, wake, boat, post, hud, input, town, birds, moorings;
 let rival, rivalWake, skipper;
 let power, powerWake, powerWakeIdle = 99;
 let droplet, dropWake, dropWakeIdle = 99;
@@ -104,6 +102,7 @@ async function boot() {
 
   town = await step(80, 'Building the town…', () => buildTown(scene));
   birds = makeBirds(scene);
+  moorings = await step(86, 'Mooring the fleet…', () => buildMoorings(scene, town));
 
   await step(90, 'Flooding the bay…', () => {
     configureWaves(state.wind.from, state.wind.speed);
@@ -261,30 +260,66 @@ const qBoat = new THREE.Quaternion();
 const qYaw = new THREE.Quaternion();
 const qPitch = new THREE.Quaternion();
 const eBoat = new THREE.Euler(0, 0, 0, 'YXZ');
-const chasePos = new THREE.Vector3(0, 6, 320);
-const chaseAim = new THREE.Vector3();
+const camAim = new THREE.Vector3(0, 3, 280);
+const flyAnchor = new THREE.Vector3();
 const tmp = new THREE.Vector3();
 const heading2 = new THREE.Vector2();
+let flyValid = false;
 
 /** Whichever helm you are standing at. */
 function helmed() {
   return state.vessel === 'power' ? power : state.vessel === 'drop' ? droplet : boat;
 }
 
+export const VIEWS = ['helm', 'orbit', 'flyby'];
+const VIEW_NAMES = { helm: 'At the helm', orbit: 'Orbit — drag to swing, wheel to zoom', flyby: 'Fly-by' };
+
 function updateCamera(dt) {
   const v = helmed();
   v.root.updateMatrixWorld(true);
+  camera.up.set(0, 1, 0);
 
-  if (state.chase) {
-    const a = v.heading + state.chaseAngle;
-    const off = tmp.set(Math.sin(a) * state.chaseDist, state.chaseHeight, Math.cos(a) * state.chaseDist);
-    chasePos.lerp(off.add(v.position), 1 - Math.exp(-dt * 2.6));
-    // aim at the middle of whatever it is following — a mast height above a
-    // three-metre probe puts it off the bottom of the frame
-    chaseAim.lerp(tmp.copy(v.position).setY(v.position.y + (v.chaseAim ?? 3.4)), 1 - Math.exp(-dt * 5));
-    camera.position.copy(chasePos);
-    camera.up.set(0, 1, 0);
-    camera.lookAt(chaseAim);
+  // the point every external view looks at: the middle of the thing, not a
+  // mast height above it
+  const aimY = v.position.y + (v.chaseAim ?? 3.4);
+  camAim.lerp(tmp.set(v.position.x, aimY, v.position.z), 1 - Math.exp(-dt * 14));
+
+  if (state.view === 'orbit') {
+    // Placed, not chased. The old camera lerped toward a moving offset in
+    // world space, which is fine at six knots and hopeless at two hundred and
+    // eighty — it simply never caught up. Anchoring the offset to the vessel
+    // means it cannot fall behind at any speed, and the only smoothing left is
+    // on the aim point.
+    const a = v.heading + Math.PI + input.lookYaw;
+    const p = clamp(input.lookPitch + 0.16, -1.15, 1.30);
+    const d = state.orbitDist;
+    const flat = Math.cos(p) * d;
+    camera.position.set(
+      camAim.x + Math.sin(a) * flat,
+      Math.max(camAim.y + Math.sin(p) * d, sampleSeaY(v) + 0.6),
+      camAim.z + Math.cos(a) * flat
+    );
+    camera.lookAt(camAim);
+    return;
+  }
+
+  if (state.view === 'flyby') {
+    // A fixed point in the world that the vessel goes past, re-anchored ahead
+    // of it whenever it gets away. Nothing else shows you three hundred knots
+    // for what it is.
+    const away = flyAnchor.distanceTo(v.position);
+    if (!flyValid || away > 260 || away < 12) {
+      const lead = Math.max(45, Math.min(210, v.speed * 1.6));
+      const side = (Math.random() < 0.5 ? 1 : -1) * (18 + Math.random() * 40);
+      flyAnchor.set(
+        v.position.x + Math.sin(v.heading) * lead + Math.cos(v.heading) * side,
+        Math.max(2.5, v.position.y + 1.5 + Math.random() * 14),
+        v.position.z + Math.cos(v.heading) * lead - Math.sin(v.heading) * side
+      );
+      flyValid = true;
+    }
+    camera.position.copy(flyAnchor);
+    camera.lookAt(camAim);
     return;
   }
 
@@ -298,6 +333,29 @@ function updateCamera(dt) {
   qYaw.setFromAxisAngle(UP, input.lookYaw);
   qPitch.setFromAxisAngle(RIGHT, input.lookPitch);
   camera.quaternion.copy(qBoat).multiply(qYaw).multiply(qPitch);
+}
+
+const _seaProbe = { y: 0, normal: new THREE.Vector3(), fold: 1 };
+function sampleSeaY(v) {
+  sampleOcean(v.position.x, v.position.z, state.time, _seaProbe);
+  return _seaProbe.y;
+}
+
+function setView(next, quiet = false) {
+  state.view = next;
+  flyValid = false;
+  if (next === 'orbit') {
+    // Open on a quarter view rather than dead astern. Astern of a boat is her
+    // transom and astern of the probe is a point aimed at your eye; three
+    // quarters is where either of them actually has a profile.
+    input.lookYaw = 0.62;
+    input.lookPitch = 0.05;
+    state.orbitDist = state.vessel === 'drop' ? 9 : state.vessel === 'power' ? 14 : 20;
+  } else if (next === 'helm') {
+    input.lookYaw = 0;
+    input.lookPitch = -0.03;
+  }
+  if (!quiet) hud.toast(VIEW_NAMES[next]);
 }
 
 // ---------------------------------------------------------------------------
@@ -437,8 +495,11 @@ function needsRefraction() {
 
 function hotkeys() {
   if (input.tapped('KeyC')) {
-    state.chase = !state.chase;
-    hud.toast(state.chase ? 'Chase camera' : 'At the helm');
+    setView(VIEWS[(VIEWS.indexOf(state.view) + 1) % VIEWS.length]);
+  }
+  const z = input.takeZoom();
+  if (z && state.view === 'orbit') {
+    state.orbitDist = clamp(state.orbitDist * Math.pow(1.16, z), 3.5, 400);
   }
   if (input.tapped('KeyT') && state.vessel === 'sail') {
     boat.autoTrim = !boat.autoTrim;
@@ -510,8 +571,9 @@ function boardNearest() {
     return;
   }
   state.vessel = best;
-  input.lookYaw = 0;
-  input.lookPitch = -0.03;
+  // there is nothing to look at from inside the probe, so it opens on the
+  // outside view; the boats have decks worth standing on
+  setView(best === 'drop' ? 'orbit' : 'helm', true);
   hud.toast(VESSELS[best].hint());
 }
 
@@ -572,6 +634,7 @@ function loop(now) {
     updateCourse(dt);
     updateCamera(dt);
     birds(state.time);
+    moorings(state.time);
     renderScene(dt, state.time);
     return;
   }
@@ -616,7 +679,8 @@ function loop(now) {
   power.updateVisual(dt, t);
   droplet.cacheSea(t);
   droplet.updateVisual(dt, t);
-  droplet.writeOceanUniforms(ocean.uniforms.uDroplet, ocean.uniforms.uShock);
+  droplet.writeOceanUniforms(ocean.uniforms.uDroplet, ocean.uniforms.uDropTrail,
+    ocean.uniforms.uShock);
 
   heading2.set(Math.sin(boat.heading), Math.cos(boat.heading));
   wake.update(dt, boat.position, heading2, Math.abs(boat.surge), 9.5);
@@ -648,6 +712,7 @@ function loop(now) {
   updateCourse(dt);
   updateCamera(dt);
   birds(t);
+  moorings(t);
 
   renderScene(dt, t, powerTrail, dropTrail);
 
