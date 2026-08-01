@@ -487,9 +487,13 @@ export class Powerboat {
 
     // ---- throttle: W forward, S back, Space to centre ---------------------
     if (input) {
-      // input.trim is +1 on S and -1 on W, which is "ease" and "sheet in" on
-      // the yacht and reads naturally as back and forward on a lever
-      this.throttle = clamp(this.throttle - input.trim * dt * 0.85, -0.40, 1);
+      // Hold for power, let go and she winds down — not a lever that sits
+      // where you left it. A boat's throttle really does stay put, but nobody
+      // expects the same key to mean "sheet in" on one hull and "leave it
+      // there" on the next.
+      const want = input.trim < 0 ? 1 : input.trim > 0 ? -0.40 : 0;
+      const rate = want === 0 ? 1.5 : 0.95;
+      this.throttle += clamp(want - this.throttle, -rate * dt, rate * dt);
       if (input.neutral) this.throttle = damp(this.throttle, 0, 9, dt);
       this.steer = damp(this.steer, clamp(input.rudder, -1, 1), 6, dt);
     }

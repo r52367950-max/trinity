@@ -130,6 +130,19 @@ three-metre object is not a turn at all. That is not a shortcut: a thing that
 can do those four things is a thing whose momentum is not its own problem, and
 the way it moves is the only evidence of that you ever get.
 
+Stopping is not the same problem as starting for something like that, so the
+brake is five times the accelerator: `S` kills three hundred knots in about a
+sixth of a second and is still something you can steer through, and `Space` is
+the absolute version. Let go of everything and it winds down gently rather than
+holding — hold to go, release to slow, which is what hands expect and what a
+boat's throttle lever deliberately is not.
+
+And it does something while it is doing nothing. Two thin rings and a scatter
+of blue points hang in the water astern of the needle, turning slowly and
+breathing; they come up when it settles and are gone the instant it moves.
+That is the right way round. A thing that accelerates like this is not
+straining while it runs — it is straining while it waits.
+
 The sea knows about it. The ocean's vertex shader takes a pressed well and a
 raised rim with the normal tilted to match, so it shades as a dish rather than
 a painted hole — and the well is not a point but a **segment**, running from
@@ -154,6 +167,11 @@ wetted area collapses, and drag *falls* while speed rises; she levels off and
 goes, to about 28 knots. Turning is thrust vectoring off the outboard rather
 than a rudder, so she steers on the throttle and leans **into** a turn, which is
 the one thing a keelboat can never do.
+
+The throttle is held rather than set — hold `W` for power, let go and it winds
+back to nothing and the hull's own drag brings her down. A real boat's lever
+does stay where you leave it, but nobody expects the same key to mean "sheet
+in" on one hull and "leave it there" on the next.
 
 The battery is the price: ten minutes flat out, less if you are heavy-handed,
 and it trickles back from the panels while she idles. Flat, she limps at a

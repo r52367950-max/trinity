@@ -4456,9 +4456,13 @@ class Powerboat {
 
     // ---- throttle: W forward, S back, Space to centre ---------------------
     if (input) {
-      // input.trim is +1 on S and -1 on W, which is "ease" and "sheet in" on
-      // the yacht and reads naturally as back and forward on a lever
-      this.throttle = clamp(this.throttle - input.trim * dt * 0.85, -0.40, 1);
+      // Hold for power, let go and she winds down — not a lever that sits
+      // where you left it. A boat's throttle really does stay put, but nobody
+      // expects the same key to mean "sheet in" on one hull and "leave it
+      // there" on the next.
+      const want = input.trim < 0 ? 1 : input.trim > 0 ? -0.40 : 0;
+      const rate = want === 0 ? 1.5 : 0.95;
+      this.throttle += clamp(want - this.throttle, -rate * dt, rate * dt);
       if (input.neutral) this.throttle = damp(this.throttle, 0, 9, dt);
       this.steer = damp(this.steer, clamp(input.rudder, -1, 1), 6, dt);
     }
@@ -4599,7 +4603,7 @@ const THREE = __THREE;
 const {shared,KNOTS} = __m_shared;
 const {SKY_SAMPLE_GLSL,CLOUD_GLSL} = __m_atmosphere;
 const {sampleOcean} = __m_waves;
-const {clamp,damp} = __m_utils;
+const {clamp,damp,makeRng} = __m_utils;
 
 /**
  * The probe.
@@ -4622,6 +4626,8 @@ const LENGTH = 3.5;
 const MAX_AHEAD = 148;      // m/s — about 288 knots
 const MAX_ASTERN = 96;      // about 187 knots
 const ACCEL = 190;          // m/s^2; it reaches cruise in under a second
+const BRAKE = 950;          // and sheds it in a sixth of one
+const COAST = 15;           // what it gives back when you ask for nothing
 const TURN_RATE = 13.0;     // rad/s at full deflection — a corner, not a circle
 const HOVER_MIN = 1.2;
 const HOVER_MAX = 900;
@@ -4741,15 +4747,18 @@ function dropletMaterial() {
       // most of what separates metal from glass
       uReflectivity: { value: 0.86 },
       uCharge: { value: 0 },       // 0..1, flares while it is manoeuvring hard
+      uAura: { value: 0 },         // 0..1, the opposite: up while it waits
     },
     vertexShader: /* glsl */`
       precision highp float;
       varying vec3 vWorld;
       varying vec3 vNormal2;
+      varying float vAxial;    // -1 at the needle, +1 at the bulb
       void main() {
         vec4 wp = modelMatrix * vec4(position, 1.0);
         vWorld = wp.xyz;
         vNormal2 = normalize(mat3(modelMatrix) * normal);
+        vAxial = position.z / ${(LENGTH * 0.5).toFixed(3)};
         gl_Position = projectionMatrix * viewMatrix * wp;
       }
     `,
@@ -4759,10 +4768,11 @@ function dropletMaterial() {
       ${SKY_SAMPLE_GLSL}
       ${CLOUD_GLSL}
 
-      uniform float uSunIntensity, uCharge, uReflectivity;
+      uniform float uSunIntensity, uCharge, uReflectivity, uAura, uTime;
       uniform vec3 uSeaColor;
       varying vec3 vWorld;
       varying vec3 vNormal2;
+      varying float vAxial;
 
       void main() {
         vec3 N = normalize(vNormal2);
@@ -4822,15 +4832,149 @@ function dropletMaterial() {
         col += uSunColor * uSunIntensity * pow(RoS, 140.0) * 1.1;
         col += uSunColor * uSunIntensity * pow(RoS, 14.0) * 0.055;
 
-        // and it lights up along its own axis when it is working
+        // it lights up along its own axis when it is working
         float graze = pow(1.0 - NoV, 4.0);
         col += vec3(0.35, 0.62, 0.95) * uCharge * graze * 1.6;
+
+        // and the last of the needle takes a little of the idle glow, so the
+        // halo behind it looks like it is coming *out* of the thing rather
+        // than hanging in the water on its own
+        float tail = smoothstep(-0.30, -0.94, vAxial);
+        col += vec3(0.20, 0.55, 1.0) * uAura * tail * (0.10 + graze * 0.62) *
+               (0.7 + 0.3 * sin(uTime * 2.1));
 
         col = applyAerial(col, vWorld);
         gl_FragColor = vec4(col, 1.0);
       }
     `,
   });
+}
+
+// ---------------------------------------------------------------------------
+// the charging aura
+// ---------------------------------------------------------------------------
+
+/**
+ * What it does while it is doing nothing.
+ *
+ * Two thin rings and a scatter of points, hanging in the water astern of the
+ * needle, turning slowly and breathing. They come up when it comes to rest and
+ * are gone the instant it moves — which is the right way round: a thing that
+ * accelerates like this is not straining while it runs, it is straining while
+ * it waits.
+ *
+ * All of it is additive with no depth write, so it reads as light rather than
+ * as geometry, and none of it is lit — the probe's own shell is the only thing
+ * in the scene that answers to the sun.
+ */
+function buildAura(length) {
+  const group = new THREE.Group();
+  const uniforms = {
+    uAura: { value: 0 },
+    uTime: shared.uTime,
+    uTint: { value: new THREE.Color(0.20, 0.55, 1.0) },
+  };
+
+  const ringMat = (inner, outer) => new THREE.ShaderMaterial({
+    uniforms,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    vertexShader: /* glsl */`
+      varying vec2 vP;
+      void main() {
+        vP = position.xy;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      precision highp float;
+      uniform float uAura, uTime;
+      uniform vec3 uTint;
+      varying vec2 vP;
+      void main() {
+        float r = length(vP);
+        // soft on both edges, so the band has no cut line anywhere
+        float band = smoothstep(${inner.toFixed(3)}, ${((inner + outer) * 0.5).toFixed(3)}, r) *
+                     (1.0 - smoothstep(${((inner + outer) * 0.5).toFixed(3)}, ${outer.toFixed(3)}, r));
+        // a slow breath, and a few brighter arcs chasing round it
+        float a = atan(vP.y, vP.x);
+        float chase = 0.62 + 0.38 * sin(a * 3.0 - uTime * 1.7);
+        float pulse = 0.55 + 0.45 * sin(uTime * 2.1);
+        float i = band * chase * pulse * uAura;
+        if (i < 0.004) discard;
+        // additive blending here is src*alpha + dst, so the contribution goes
+        // as i squared — which is what keeps the faint end genuinely faint
+        gl_FragColor = vec4(uTint * i * 0.85, i * 0.60);
+      }
+    `,
+  });
+
+  const r1 = new THREE.Mesh(new THREE.RingGeometry(0.16, 0.46, 64, 1), ringMat(0.18, 0.44));
+  r1.position.z = -length * 0.5 - 0.22;
+  const r2 = new THREE.Mesh(new THREE.RingGeometry(0.30, 0.74, 64, 1), ringMat(0.32, 0.72));
+  r2.position.z = -length * 0.5 - 0.62;
+  group.add(r1, r2);
+
+  // the points: a loose shell of them, drifting round the axis
+  const N = 30;
+  const pos = new Float32Array(N * 3);
+  const seed = new Float32Array(N);
+  const rnd = makeRng(4211);
+  for (let i = 0; i < N; i++) {
+    const a = rnd() * Math.PI * 2;
+    const r = 0.20 + rnd() * 0.62;
+    pos[i * 3] = Math.cos(a) * r;
+    pos[i * 3 + 1] = Math.sin(a) * r;
+    pos[i * 3 + 2] = -length * 0.5 - 0.15 - rnd() * 1.5;
+    seed[i] = rnd();
+  }
+  const pg = new THREE.BufferGeometry();
+  pg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  pg.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+  const points = new THREE.Points(pg, new THREE.ShaderMaterial({
+    uniforms,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexShader: /* glsl */`
+      attribute float aSeed;
+      uniform float uTime, uAura;
+      varying float vI;
+      void main() {
+        // each one turns about the axis at its own rate and bobs a little
+        float a = uTime * (0.25 + aSeed * 0.65);
+        float c = cos(a), s = sin(a);
+        vec3 p = vec3(position.x * c - position.y * s,
+                      position.x * s + position.y * c,
+                      position.z + sin(uTime * 1.4 + aSeed * 8.0) * 0.09);
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        // they wink in and out, which is what stops it reading as a decal
+        vI = uAura * (0.35 + 0.65 * pow(0.5 + 0.5 * sin(uTime * 2.6 + aSeed * 21.0), 2.0));
+        gl_PointSize = (1.1 + aSeed * 1.9) * (34.0 / max(-mv.z, 0.6));
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: /* glsl */`
+      precision highp float;
+      uniform vec3 uTint;
+      varying float vI;
+      void main() {
+        float d = length(gl_PointCoord - 0.5) * 2.0;
+        float g = 1.0 - smoothstep(0.0, 1.0, d);
+        g *= g;
+        float i = g * vI;
+        if (i < 0.004) discard;
+        gl_FragColor = vec4(uTint * i * 0.9, i * 0.55);
+      }
+    `,
+  }));
+  points.frustumCulled = false;
+  group.add(points);
+
+  group.renderOrder = 20;      // additive light goes down after the opaque pass
+  return { group, uniforms };
 }
 
 // ---------------------------------------------------------------------------
@@ -4849,6 +4993,7 @@ class Droplet {
     this.surge = 0;
     this.altitude = 8;           // metres above the local sea surface
     this.charge = 0;
+    this.aura = 0;               // the idle halo, up when it is holding still
     this.active = false;         // summoned and under control
     this.arriving = 0;
     this.stopFlash = 0;
@@ -4867,6 +5012,10 @@ class Droplet {
     this.mesh.frustumCulled = false;
     this.mesh.castShadow = false;      // a mirror casting a soft shadow reads wrong
     this.root.add(this.mesh);
+
+    const aura = buildAura(LENGTH);
+    this.auraUniforms = aura.uniforms;
+    this.root.add(aura.group);
 
     // the eye rides just behind the tip, looking out along the axis
     this.helm = new THREE.Group();
@@ -4916,11 +5065,18 @@ class Droplet {
       // Eased off near rest only so that aiming it by hand is possible.
       const rate = TURN_RATE * (0.24 + 0.76 * Math.min(1, Math.abs(this.surge) / 40));
       this.heading -= input.rudder * rate * dt;
-      // It has no drag and no momentum to speak of, so the throttle is a
-      // statement of intent rather than a request: hold a key and it winds to
-      // the stop, let go and it simply holds whatever it was doing.
-      if (input.trim < 0) this.surge = Math.min(MAX_AHEAD, this.surge + ACCEL * dt);
-      else if (input.trim > 0) this.surge = Math.max(-MAX_ASTERN, this.surge - ACCEL * dt);
+      // Hold to accelerate, let go and it winds down. Stopping is not the same
+      // problem as starting for a thing whose momentum is not its own: the
+      // brake is five times the accelerator, so S kills three hundred knots in
+      // a sixth of a second and is still something you can steer through.
+      if (input.trim < 0) {
+        this.surge = Math.min(MAX_AHEAD, this.surge + (this.surge < 0 ? BRAKE : ACCEL) * dt);
+      } else if (input.trim > 0) {
+        this.surge = Math.max(-MAX_ASTERN, this.surge - (this.surge > 0 ? BRAKE : ACCEL) * dt);
+      } else {
+        const give = COAST * dt;
+        this.surge = Math.abs(this.surge) <= give ? 0 : this.surge - Math.sign(this.surge) * give;
+      }
 
       // dead stop
       if (input.neutral && Math.abs(this.surge) > 2) {
@@ -4952,6 +5108,11 @@ class Droplet {
     // it glows along its axis in proportion to how hard it is working
     const work = Math.abs(this.surge) / MAX_AHEAD + (input ? Math.abs(input.rudder) * 0.6 : 0);
     this.charge = damp(this.charge, clamp(work, 0, 1) * 0.8 + this.stopFlash, 6, dt);
+
+    // The aura is the other way round: it takes its time coming up once the
+    // thing has settled, and vanishes the instant it moves.
+    const still = Math.abs(this.surge) < 1.5;
+    this.aura = damp(this.aura, still ? 1 : 0, still ? 0.9 : 7.0, dt);
   }
 
   seaAt(time) {
@@ -4974,6 +5135,8 @@ class Droplet {
     this.root.rotation.x = this.pitchAim;
     this.root.rotation.z = 0;
     this.mat.uniforms.uCharge.value = this.charge;
+    this.mat.uniforms.uAura.value = this.aura;
+    this.auraUniforms.uAura.value = this.aura;
   }
 
   /**
