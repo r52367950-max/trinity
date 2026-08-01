@@ -145,11 +145,41 @@ straining while it runs — it is straining while it waits.
 
 The sea knows about it. The ocean's vertex shader takes a pressed well and a
 raised rim with the normal tilted to match, so it shades as a dish rather than
-a painted hole — and the well is not a point but a **segment**, running from
-under the probe back along the way it came. Standing still that is a dish;
-moving, it is a trench with the water held apart along both walls, tapering
-shut a couple of hundred metres astern where the sea falls back in. Stop dead
-and a ring runs out across the water and dies.
+a painted hole. Standing still that is a dish; moving, it is a trench with the
+water held apart along both walls, widening with speed and closing back a
+couple of hundred metres astern. Stop dead and a ring runs out across the water
+and dies.
+
+The trench is swept along **the track the probe has actually flown**, kept as a
+short decaying path history, not along the direction it currently points.
+Anchoring it to the heading was wrong in two visible ways: the whole
+two-hundred-metre gash swung round with the nose, and it snapped end for end
+the moment speed crossed zero. Reversing now simply drives back up a trench
+that is already there.
+
+Two details that matter more than they look:
+
+- The walk builds a **distance field** to the track and evaluates the profile
+  once, rather than evaluating a profile per segment and taking the maximum.
+  Those are not the same thing. The rim of one capsule is a closed stadium
+  outline, and with the ring sitting about a segment-length out from the spine,
+  unioning them chains the wall into a string of loops instead of two parallel
+  lines.
+- The waves are **told about it**. Inside the well the surface is being forced
+  and cannot carry its own swell through, so the Gerstner amplitude is damped
+  there; along the rim the displaced water has to go somewhere, so it is lifted.
+  That is one multiply on the gain and it is the difference between a trench cut
+  through the sea and a trench painted on top of it.
+
+A bounding circle round the live path lets the vertex shader reject the whole
+walk with one dot product, which for a nine-kilometre grid is almost every
+vertex — that is what keeps a sixteen-node search affordable per vertex.
+
+And it does something while it is doing nothing: a scatter of faint blue points
+hangs in the water astern of the needle, drifting round the axis and winking,
+coming up when it settles and gone the instant it moves. There were solid rings
+here too and they looked like decals — geometry pretending to be light, which
+is what a hard-edged annulus always reads as.
 
 ## The powerboat
 

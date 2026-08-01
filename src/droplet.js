@@ -31,6 +31,11 @@ const TURN_RATE = 13.0;     // rad/s at full deflection — a corner, not a circ
 const HOVER_MIN = 1.2;
 const HOVER_MAX = 900;
 
+// the track the trench is swept along
+const PATH_N = 16;
+const PATH_SPACING = 13;    // metres between snapshots
+const PATH_FADE = 0.5;      // strength lost per second, so the sea closes back
+
 // ---------------------------------------------------------------------------
 // shape
 // ---------------------------------------------------------------------------
@@ -256,15 +261,19 @@ function dropletMaterial() {
 /**
  * What it does while it is doing nothing.
  *
- * Two thin rings and a scatter of points, hanging in the water astern of the
- * needle, turning slowly and breathing. They come up when it comes to rest and
- * are gone the instant it moves — which is the right way round: a thing that
+ * A scatter of blue points hanging in the water astern of the needle, drifting
+ * round the axis and winking. They come up when it comes to rest and are gone
+ * the instant it moves — which is the right way round: a thing that
  * accelerates like this is not straining while it runs, it is straining while
  * it waits.
  *
- * All of it is additive with no depth write, so it reads as light rather than
- * as geometry, and none of it is lit — the probe's own shell is the only thing
- * in the scene that answers to the sun.
+ * Points only. There were solid rings here too and they looked like decals —
+ * geometry pretending to be light, which is what a hard-edged annulus always
+ * reads as. Loose points read as light because that is closer to what they
+ * are.
+ *
+ * Additive with no depth write, and unlit: the probe's own shell is the only
+ * thing here that answers to the sun.
  */
 function buildAura(length) {
   const group = new THREE.Group();
@@ -274,49 +283,6 @@ function buildAura(length) {
     uTint: { value: new THREE.Color(0.20, 0.55, 1.0) },
   };
 
-  const ringMat = (inner, outer) => new THREE.ShaderMaterial({
-    uniforms,
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    side: THREE.DoubleSide,
-    vertexShader: /* glsl */`
-      varying vec2 vP;
-      void main() {
-        vP = position.xy;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: /* glsl */`
-      precision highp float;
-      uniform float uAura, uTime;
-      uniform vec3 uTint;
-      varying vec2 vP;
-      void main() {
-        float r = length(vP);
-        // soft on both edges, so the band has no cut line anywhere
-        float band = smoothstep(${inner.toFixed(3)}, ${((inner + outer) * 0.5).toFixed(3)}, r) *
-                     (1.0 - smoothstep(${((inner + outer) * 0.5).toFixed(3)}, ${outer.toFixed(3)}, r));
-        // a slow breath, and a few brighter arcs chasing round it
-        float a = atan(vP.y, vP.x);
-        float chase = 0.62 + 0.38 * sin(a * 3.0 - uTime * 1.7);
-        float pulse = 0.55 + 0.45 * sin(uTime * 2.1);
-        float i = band * chase * pulse * uAura;
-        if (i < 0.004) discard;
-        // additive blending here is src*alpha + dst, so the contribution goes
-        // as i squared — which is what keeps the faint end genuinely faint
-        gl_FragColor = vec4(uTint * i * 0.85, i * 0.60);
-      }
-    `,
-  });
-
-  const r1 = new THREE.Mesh(new THREE.RingGeometry(0.16, 0.46, 64, 1), ringMat(0.18, 0.44));
-  r1.position.z = -length * 0.5 - 0.22;
-  const r2 = new THREE.Mesh(new THREE.RingGeometry(0.30, 0.74, 64, 1), ringMat(0.32, 0.72));
-  r2.position.z = -length * 0.5 - 0.62;
-  group.add(r1, r2);
-
-  // the points: a loose shell of them, drifting round the axis
   const N = 30;
   const pos = new Float32Array(N * 3);
   const seed = new Float32Array(N);
@@ -422,6 +388,7 @@ export class Droplet {
     this.root.add(this.helm);
 
     this.shock = { x: 0, z: 0, r: 0, strength: 0 };
+    this.path = new Float32Array(PATH_N * 4);   // x, z, strength, radius
     this.chaseAim = 0.1;         // the chase camera looks at it, not over it
   }
 
@@ -542,25 +509,65 @@ export class Droplet {
    * What the ocean shader needs: where the well is, how high it is being held,
    * and how hard. Returns null when the probe is not on station.
    */
-  writeOceanUniforms(uDroplet, uDropTrail, uShock) {
-    if (!this.active) {
-      uDroplet.value.set(0, 0, 999, 0);
-      uDropTrail.value.set(0, 1, 0);
-    } else {
-      const h = Math.max(0, this.position.y - this.seaLast);
-      // it stops dishing the sea out once it is well clear of it
-      const strength = clamp(1 - (h - 2) / 26, 0, 1) * (this.arriving > 0 ? 0.4 : 1);
-      uDroplet.value.set(this.position.x, this.position.z, Math.min(h, 24), strength);
-      // the trench runs the way it came from, and the faster it is going the
-      // longer the water takes to fall back in behind it
-      const sign = this.surge >= 0 ? -1 : 1;
-      uDropTrail.value.set(
-        Math.sin(this.heading) * sign,
-        Math.cos(this.heading) * sign,
-        clamp(Math.abs(this.surge) * 1.35, 0, 260)
-      );
+  /**
+   * Lay down the track the trench is swept along.
+   *
+   * Node 0 rides with the probe so the head of the trench never detaches from
+   * it; the rest are snapshots dropped every so many metres and fading out on
+   * their own. Because the geometry is a record of where the thing *went*, it
+   * cannot swing round when the nose does, and reversing simply drives back up
+   * a trench that is already there.
+   */
+  recordPath(dt) {
+    const p = this.path;
+    for (let i = 0; i < PATH_N; i++) p[i * 4 + 2] = Math.max(0, p[i * 4 + 2] - dt * PATH_FADE);
+
+    const h = Math.max(0, this.position.y - this.seaLast);
+    const strength = this.active
+      ? clamp(1 - (h - 2) / 26, 0, 1) * (this.arriving > 0 ? 0.4 : 1)
+      : 0;
+    // Wider the faster it is going. A thing hovering displaces what sits under
+    // it; a thing crossing at three hundred knots has to put a great deal more
+    // water somewhere, and the trench is the only place for it to go.
+    const radius = (1.7 + Math.min(h, 24) * 0.34) *
+      (1 + clamp(Math.abs(this.surge) / MAX_AHEAD, 0, 1) * 1.35);
+
+    const dx = this.position.x - p[4];
+    const dz = this.position.z - p[6];
+    if (this.active && dx * dx + dz * dz > PATH_SPACING * PATH_SPACING) {
+      p.copyWithin(4, 0, (PATH_N - 1) * 4);      // everything ages one slot
     }
-    uShock.value.set(this.shock.x, this.shock.z, this.shock.r, this.shock.strength);
+    p[0] = this.position.x;
+    p[1] = this.position.z;
+    p[2] = strength;
+    p[3] = radius;
+  }
+
+  writeOceanUniforms(u) {
+    const p = this.path;
+    const h = Math.max(0, this.position.y - this.seaLast);
+    u.uDroplet.value.set(this.position.x, this.position.z, Math.min(h, 24), p[2]);
+
+    // bounding circle over the live nodes, so the vertex shader can reject the
+    // whole walk with one dot product
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity, live = 0, pad = 4;
+    for (let i = 0; i < PATH_N; i++) {
+      const s = p[i * 4 + 2];
+      u.uDropPath.value[i].set(p[i * 4], p[i * 4 + 1], s, p[i * 4 + 3]);
+      if (s <= 0.002) continue;
+      live++;
+      minX = Math.min(minX, p[i * 4]); maxX = Math.max(maxX, p[i * 4]);
+      minZ = Math.min(minZ, p[i * 4 + 1]); maxZ = Math.max(maxZ, p[i * 4 + 1]);
+      pad = Math.max(pad, p[i * 4 + 3] * 2.6);
+    }
+    if (live === 0) {
+      u.uDropBound.value.set(0, 0, 0, 0);
+    } else {
+      const cx = (minX + maxX) * 0.5, cz = (minZ + maxZ) * 0.5;
+      const r = Math.hypot(maxX - cx, maxZ - cz) + pad;
+      u.uDropBound.value.set(cx, cz, r, 1);
+    }
+    u.uShock.value.set(this.shock.x, this.shock.z, this.shock.r, this.shock.strength);
   }
 
   /** Cached each frame so writeOceanUniforms does not re-sample the sea. */

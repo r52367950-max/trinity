@@ -631,6 +631,8 @@ function loop(now) {
     power.updateVisual(dt, state.time);
     droplet.cacheSea(state.time);
     droplet.updateVisual(dt, state.time);
+    droplet.recordPath(dt);
+    droplet.writeOceanUniforms(ocean.uniforms);
     updateCourse(dt);
     updateCamera(dt);
     birds(state.time);
@@ -679,8 +681,8 @@ function loop(now) {
   power.updateVisual(dt, t);
   droplet.cacheSea(t);
   droplet.updateVisual(dt, t);
-  droplet.writeOceanUniforms(ocean.uniforms.uDroplet, ocean.uniforms.uDropTrail,
-    ocean.uniforms.uShock);
+  droplet.recordPath(dt);
+  droplet.writeOceanUniforms(ocean.uniforms);
 
   heading2.set(Math.sin(boat.heading), Math.cos(boat.heading));
   wake.update(dt, boat.position, heading2, Math.abs(boat.surge), 9.5);

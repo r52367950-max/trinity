@@ -28,6 +28,9 @@ const SEGMENTS = 320;
  */
 const MAX_WAKES = 4;
 
+/** How many nodes of the probe's track the trench is swept along. */
+export const DROP_PATH_N = 16;
+
 function wakeUniforms() {
   const u = {};
   for (let i = 0; i < MAX_WAKES; i++) {
@@ -146,8 +149,12 @@ export class Ocean {
       // the probe: centre.xz, hover height, strength — and the ring it throws
       // off when it stops dead
       uDroplet: { value: new THREE.Vector4(0, 0, 999, 0) },
-      // the direction the trench trails and how far it runs before it closes
-      uDropTrail: { value: new THREE.Vector3(0, 1, 0) },
+      // The trench is swept along where the probe has actually been, not along
+      // where it happens to be pointing: x, z, strength, radius per node,
+      // newest first. uDropBound is a bounding circle so the vertex shader can
+      // skip the whole walk for the enormous majority of the grid.
+      uDropPath: { value: Array.from({ length: DROP_PATH_N }, () => new THREE.Vector4()) },
+      uDropBound: { value: new THREE.Vector4(0, 0, 0, 0) },
       uShock: { value: new THREE.Vector4(0, 0, 0, 0) },
 
       uFoamAmount: { value: 1.0 },
@@ -182,7 +189,8 @@ export class Ocean {
       uniform vec3 uTerrainInfo;   // centre.x, centre.z, size
       uniform mat4 uReflMatrix;
       uniform vec4 uDroplet;       // centre.xz, hover height, strength
-      uniform vec3 uDropTrail;     // unit direction astern, trench length
+      uniform vec4 uDropPath[${DROP_PATH_N}];   // x, z, strength, radius
+      uniform vec4 uDropBound;     // centre.xz, radius, active
 
       varying float vDropRim;
       varying vec3 vWorld;
@@ -215,38 +223,68 @@ export class Ocean {
         float lodFade = smoothstep(90.0, 2600.0, dist) * 0.55;
         float ampFade = 1.0 - smoothstep(1400.0, 7000.0, dist) * 0.82;
 
+        // ---- the probe's trench ------------------------------------------
+        // The sea is held down under it. Whatever is doing that, it is not air
+        // pressure — a metre-wide object does not dish out ten metres of ocean
+        // — so it reads as force with no visible cause, which is the point.
+        //
+        // The well is swept along the track the probe has actually flown, not
+        // along the direction it currently happens to point. Anchoring it to
+        // the heading meant the whole two-hundred-metre gash swung round with
+        // the nose, and snapped end for end the moment speed crossed zero.
+        // The walk builds a *distance field* to the track and evaluates the
+        // profile once, rather than evaluating a profile per segment and
+        // taking the maximum. Those are not the same thing: the rim of one
+        // capsule is a closed stadium outline, and with the ring sitting about
+        // a segment-length out from the spine, unioning them chains the wall
+        // into a string of loops instead of two parallel lines.
+        float nd = 1e9, strength = 0.0, radius = 3.0;
+        vec2 radial = vec2(0.0, 1.0);
+        if (uDropBound.w > 0.5) {
+          vec2 dc = worldXZ - uDropBound.xy;
+          // one circle test throws away the whole walk for almost every vertex
+          // in a nine-kilometre grid, which is what keeps this affordable
+          if (dot(dc, dc) < uDropBound.z * uDropBound.z) {
+            for (int i = 0; i < ${DROP_PATH_N - 1}; i++) {
+              vec4 a = uDropPath[i];
+              vec4 b = uDropPath[i + 1];
+              if (a.z <= 0.002 && b.z <= 0.002) continue;
+              vec2 ab = b.xy - a.xy;
+              float L2 = dot(ab, ab);
+              float t = L2 > 1e-4 ? clamp(dot(worldXZ - a.xy, ab) / L2, 0.0, 1.0) : 0.0;
+              vec2 d = worldXZ - (a.xy + ab * t);
+              float R = max(mix(a.w, b.w, t), 0.6);
+              float lat = length(d);
+              float n = lat / R;
+              if (n < nd) {
+                nd = n;
+                strength = mix(a.z, b.z, t);
+                radius = R;
+                radial = d / (lat + 1e-4);
+              }
+            }
+          }
+        }
+        float well = nd < 40.0 ? exp(-nd * nd) * strength : 0.0;
+        float rim = nd < 40.0 ? exp(-pow((nd - 1.70) / 0.58, 2.0)) * strength : 0.0;
+
+        // ---- waves, told what the trench is doing to them -----------------
+        // This is the interaction: inside the well the surface is being forced
+        // and simply cannot carry its own swell through, and along the rim the
+        // water it displaced has to go somewhere.
+        float forced = clamp(well * 1.5, 0.0, 1.0);
+        float gain = sf.x * ampFade * (1.0 - 0.74 * forced) * (1.0 + 0.30 * rim);
+
         vec3 disp, nrm;
         float fold;
-        oceanSurface(worldXZ, sf.x * ampFade, lodFade, disp, nrm, fold);
+        oceanSurface(worldXZ, gain, lodFade, disp, nrm, fold);
 
-        // The probe holds the sea down under itself. Whatever is doing it, it
-        // is not air pressure — a metre-wide object does not dish out ten
-        // metres of ocean — so it reads as force with no visible cause, which
-        // is the point of the thing.
-        // The well is not a point but a *segment*: it starts under the probe
-        // and trails astern, so standing still it is a dish and at speed it is
-        // a trench with the sea held apart along both walls. The taper is what
-        // closes it again a couple of hundred metres back.
-        vec2 astern = uDropTrail.xy;
-        float along = clamp(dot(worldXZ - uDroplet.xy, astern), 0.0, uDropTrail.z);
-        vec2 spine = uDroplet.xy + astern * along;
-        vec2 toDrop = worldXZ - spine;
-        float lat = length(toDrop);
-        // the walls fall back together with distance behind
-        float taper = uDropTrail.z > 0.5 ? pow(1.0 - along / uDropTrail.z, 1.4) : 1.0;
-
-        // scaled off the thing doing it: a three-metre object dishes out a
-        // few metres of sea, not a crater you could park a ship in
-        float dropR = (1.7 + uDroplet.z * 0.34) * (0.75 + 0.25 * taper);
-        float dropD = lat / dropR;
-        float well = exp(-dropD * dropD);
-        float rim = exp(-pow((dropD - 1.70) / 0.58, 2.0));
-        float amp = uDroplet.w * taper;
-        disp.y -= amp * (well * 1.55 - rim * 0.30);
-        vDropRim = amp * rim;
-        // tilt the normal to match, or the dish reads as a flat painted hole
-        float dhdr = -amp * (-3.1 * dropD * well + 1.78 * (dropD - 1.70) * rim) / dropR;
-        vec2 radial = toDrop / (lat + 1e-4);
+        disp.y -= well * 1.55 - rim * 0.30;
+        vDropRim = rim;
+        // tilt the normal to match, or the dish reads as a flat painted hole.
+        // The gradient is taken from the nearest point on the track, which for
+        // a swept well is the only direction the wall actually falls in.
+        float dhdr = -(-3.1 * min(nd, 6.0) * well + 1.78 * (min(nd, 6.0) - 1.70) * rim) / radius;
         nrm = normalize(vec3(nrm.x - radial.x * dhdr, nrm.y, nrm.z - radial.y * dhdr));
 
         vec3 world = vec3(worldXZ.x + disp.x, disp.y, worldXZ.y + disp.z);
