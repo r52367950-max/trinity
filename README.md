@@ -3,6 +3,8 @@
 A first-person sailing game. You stand at the tiller of a 9.5 metre sloop in a
 bay with a whitewashed town stacked up the hillside, and you sail — properly,
 against apparent wind, unable to point closer than about 40° to the breeze.
+*Mistral*, an AI-skippered rival, races you round the same five marks under the
+same physics.
 
 Everything is generated at load time. There are no textures, no models and no
 assets on disk: the sea, the sky, the island, the town and the boat are all
@@ -37,7 +39,8 @@ Needs a WebGL2 browser. Click the canvas to capture the mouse.
 | mouse | look around (drag if pointer lock is unavailable) |
 | touch | hold bottom-left / bottom-right to steer, drag to look |
 
-Round the five orange marks in order. The clock starts at the first one.
+Round the five orange marks in order. The clock starts at the first one, and the
+panel top-left shows how far ahead or astern of *Mistral* you are.
 
 ## How it sails
 
@@ -55,6 +58,30 @@ velocity — which is what makes sailing feel like sailing:
 - A soft wall at hull speed (1.34·√LWL ≈ 7 knots) keeps her honest.
 
 Run aground and she stops and shoves off the shelf.
+
+## The rival
+
+*Mistral* is steered by the same `{rudder, trim}` interface the keyboard drives,
+so she is sailing under your physics, not a scripted path. The interesting part
+of racing is that you cannot steer at the mark: the no-go zone forbids it upwind,
+and running dead downwind is slower than tacking down. So five times a second
+she sweeps a fan of candidate headings and scores each by **velocity made
+good** — boatspeed from a rough polar, projected onto the bearing to the mark —
+minus two penalties:
+
+- **Corridor.** How far she is off the rhumb line, measured square to the wind.
+  The corridor narrows as the mark approaches, which turns a beat into a
+  converging zig-zag that arrives on the layline instead of two long legs.
+- **Depth.** What the seabed does along that heading, probed out to 190 m. This
+  is the term that keeps her off a lee shore; without it she sails the direct
+  bearing straight onto the beach. The probes stop at the mark and fade over the
+  last 30 m, or a mark laid anywhere near the shelf is one she circles forever.
+
+Beating and gybing angles are not hardcoded — they fall out of the polar. A
+cooldown stops her tacking herself to a standstill in a header, and if she does
+touch bottom the scoring flips to "get off the shelf" until she is clear. She
+sails a lap in about fifteen minutes; she is a little slower than your boat, so
+sailing well beats her.
 
 ## How it looks
 
@@ -93,13 +120,21 @@ about half a minute.
 
 ## Performance
 
-Three quality tiers — high, medium, fast — plus dynamic resolution on top. The
-tuner watches real frame time and gives back pixels first, because that is the
-cheapest thing to give back; only when the resolution hits its floor does the
-tier itself step down. `F` cycles the tiers by hand, and the readout in the
-corner shows tier and render scale. Software rasterisers (SwiftShader,
-llvmpipe) are detected up front and start at the bottom tier, since they will
-never win that fight.
+Four quality tiers — ultra, high, medium, fast — plus dynamic resolution on top.
+The tuner watches real frame time and gives back pixels first, because that is
+the cheapest thing to give back; only when the resolution hits its floor does the
+tier itself step down. It will also climb *up* to Ultra on a machine with
+headroom, but only if it has never had to give ground — one latch, so a machine
+sitting on the boundary does not turn into an oscillator. `F` cycles the tiers by
+hand, and the readout in the corner shows tier and render scale. Software
+rasterisers (SwiftShader, llvmpipe) are detected up front and start at the bottom
+tier, since they will never win that fight.
+
+Ultra is 85% reflection buffer, a 4096² shadow map refreshed every frame, MSAA
+4×, a fifth band of capillary detail normals on the water inside 26 m, and
+anisotropic filtering on every repeating texture — the last of which matters
+because all of them are read at grazing angles across a receding surface, which
+is exactly the case trilinear filtering blurs into mush.
 
 What the tiers actually turn off, in order of what it buys:
 
@@ -114,10 +149,19 @@ What the tiers actually turn off, in order of what it buys:
   town does not walk about; only the boat needs the map to keep up.
 - **The environment cube and its PMREM convolution refresh every 6 seconds**
   rather than twice a second. Drifting cloud barely moves ambient light.
-- Cloud reflections in the water shader, MSAA sample count, shadow map size and
-  the reflection buffer scale all step down with the tier; at the bottom tier
-  the planar mirror is dropped entirely and the water reflects the analytic sky
-  alone, which still looks like water.
+- **Each boat is three draw calls, not forty.** Everything on deck that never
+  moves relative to the hull is baked into three merged meshes split by finish —
+  glossy paint, matte joinery, bright metal — with the paint carried in vertex
+  colours. Only the boom, tiller, rudder, two sails and the running rigging stay
+  separate, because they move.
+- **Sails, buoyancy and pose are rebuilt once a frame, not once a substep.** The
+  physics runs in fixed 20 ms steps so a slow frame cannot put the boat into slow
+  motion; rebuilding two cambered sails ten times for one drawn image was work
+  nobody ever looked at.
+- Cloud reflections in the water shader, MSAA sample count, shadow map size, the
+  fifth detail normal band and the reflection buffer scale all step down with the
+  tier; at the bottom tier the planar mirror is dropped entirely and the water
+  reflects the analytic sky alone, which still looks like water.
 
 ## Layout
 
@@ -131,7 +175,8 @@ src/
   atmosphere.js     scattering LUT, sky dome, clouds, environment map
   terrain.js        analytic island heightfield and its shader
   town.js           houses, harbour, lighthouse, trees, rocks, gulls
-  boat.js           hull loft, rig, sails, sailing physics
+  boat.js           hull loft, deck gear, rig, sails, sailing physics
+  skipper.js        the rival's helmsman — VMG planner over candidate courses
   wake.js           persistent world-space foam buffer
   post.js           HDR, bloom, ACES, vignette, dither
   materials.js      aerial perspective injected into stock three materials
@@ -146,7 +191,15 @@ The boat's buoyancy calls the same wave function the vertex shader uses, so the
 hull always sits in exactly the water it looks like it is sitting in.
 
 Three scene renders happen per frame — reflection, refraction, then the beauty
-pass — which is why the town is baked down into a handful of merged meshes.
+pass — which is why the town, and now each boat, is baked down into a handful of
+merged meshes.
+
+The hull is lofted from station curves rather than assembled from primitives:
+half-beam, canoe-body depth and sheer height are functions of position along the
+waterline, and the topsides lean outboard forward (flare, which throws spray
+clear) and inboard aft (tumblehome, which stops a wide stern looking like a
+box). The paint reads off distance *below the sheer*, not absolute height, so
+the cove stripe follows the sheer spring instead of cutting across it.
 
 `window.__leeward` is exposed for tinkering from the console, and
 `__leeward.ocean.uniforms.uDebug.value` (1–8) switches the water shader to show

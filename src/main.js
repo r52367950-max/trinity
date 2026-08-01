@@ -7,7 +7,8 @@ import { PROP_LAYER } from './layers.js';
 import { buildTown, makeBirds } from './town.js';
 import { Ocean } from './ocean.js';
 import { Wake } from './wake.js';
-import { Boat } from './boat.js';
+import { Boat, LIVERIES } from './boat.js';
+import { Skipper } from './skipper.js';
 import { Post } from './post.js';
 import { Hud } from './hud.js';
 import { Input } from './input.js';
@@ -37,6 +38,10 @@ const camera = new THREE.PerspectiveCamera(57, 2, 0.15, 30000);
 const state = {
   time: 0,
   chase: false,
+  // where the chase camera sits, in boat-relative polar coordinates
+  chaseAngle: 2.6,
+  chaseDist: 15,
+  chaseHeight: 6.2,
   quality: 1,
   sunAzimuth: 1.95,
   sunElevation: 0.42,
@@ -50,6 +55,7 @@ const state = {
 };
 
 let sky, terrain, ocean, wake, boat, post, hud, input, town, birds;
+let rival, rivalWake, skipper;
 
 const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
 async function step(pct, label, fn) {
@@ -68,6 +74,14 @@ async function boot() {
   const waterNormal = await step(24, 'Carving ripples…', () => makeWaterNormalTexture(512, 11));
   const foamTex = await step(38, 'Whipping up foam…', () => makeFoamTexture(512, 91));
   const sandTex = await step(46, 'Sifting sand…', () => makeSandTexture(512, 61));
+
+  // Every one of these is read at a grazing angle across a receding surface,
+  // which is exactly the case trilinear filtering blurs into mush.
+  const aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  for (const tex of [waterNormal, foamTex, sandTex]) {
+    tex.anisotropy = aniso;
+    tex.needsUpdate = true;
+  }
 
   await step(54, 'Lighting the sky…', () => {
     sky = new Sky(renderer, noiseTex);
@@ -90,11 +104,20 @@ async function boot() {
     ocean = new Ocean(renderer, { waterNormal, foam: foamTex, noise: noiseTex, terrain });
     scene.add(ocean.mesh);
     wake = new Wake(renderer, { size: 512, region: 320 });
+    rivalWake = new Wake(renderer, { size: 256, region: 260 });
   });
 
   await step(96, 'Rigging the boat…', () => {
-    boat = new Boat(scene);
+    boat = new Boat(scene, { livery: LIVERIES.player, name: 'Leeward' });
+    // The rival starts to leeward on the line, which is the honest place for
+    // a boat you are supposed to be able to beat.
+    rival = new Boat(scene, {
+      livery: LIVERIES.rival, name: 'Mistral',
+      position: new THREE.Vector3(-26, 0, 292), heading: Math.PI, efficiency: 0.965,
+    });
+    for (const b of [boat, rival]) b.setAnisotropy(aniso);
     buildCourse();
+    skipper = new Skipper(rival, state.marks, { tack: -1 });
     post = new Post(renderer);
     hud = new Hud();
     input = new Input(canvas);
@@ -146,7 +169,9 @@ function buildCourse() {
   const darkMat = applyAtmosphere(new THREE.MeshStandardMaterial({ color: 0x1b1d22, roughness: 0.7 }));
 
   raw.forEach(([x, z], i) => {
-    const p = pushToDeepWater(x, z, 5.5);
+    // 12 m, not the 5.5 a buoy would technically float in: a mark laid on the
+    // edge of the shelf is one no boat can round without touching bottom
+    const p = pushToDeepWater(x, z, 12);
     const g = new THREE.Group();
     const body = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.86, 1.5, 12), buoyMat);
     body.position.y = 0.25;
@@ -192,6 +217,20 @@ function updateCourse(dt) {
 
 const fmtTime = (t) => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
 
+/**
+ * Distance still to sail, following the marks. Comparing this between the two
+ * boats is the only honest way to say who is winning: raw separation would
+ * call a boat ahead when she is merely further up the wrong leg.
+ */
+function courseRemaining(markIndex, pos) {
+  if (markIndex >= state.marks.length) return 0;
+  let d = Math.hypot(state.marks[markIndex].pos.x - pos.x, state.marks[markIndex].pos.y - pos.z);
+  for (let i = markIndex; i < state.marks.length - 1; i++) {
+    d += state.marks[i].pos.distanceTo(state.marks[i + 1].pos);
+  }
+  return d;
+}
+
 // ---------------------------------------------------------------------------
 // camera
 // ---------------------------------------------------------------------------
@@ -211,7 +250,8 @@ function updateCamera(dt) {
   boat.root.updateMatrixWorld(true);
 
   if (state.chase) {
-    const off = tmp.set(Math.sin(boat.heading + 2.6) * 15, 6.2, Math.cos(boat.heading + 2.6) * 15);
+    const a = boat.heading + state.chaseAngle;
+    const off = tmp.set(Math.sin(a) * state.chaseDist, state.chaseHeight, Math.cos(a) * state.chaseDist);
     chasePos.lerp(off.add(boat.position), 1 - Math.exp(-dt * 2.6));
     chaseAim.lerp(tmp.copy(boat.position).setY(boat.position.y + 3.4), 1 - Math.exp(-dt * 5));
     camera.position.copy(chasePos);
@@ -240,11 +280,12 @@ function updateCamera(dt) {
  * tiers turn down first.
  */
 const TIERS = {
-  high:   { name: 'High',   reflScale: 0.55, cloudRefl: 1, msaa: 4, shadow: 2048, shadowEvery: 2, bloom: true,  planar: 1.0, maxScale: 1.00, foam: 1.0 },
-  medium: { name: 'Medium', reflScale: 0.42, cloudRefl: 0, msaa: 2, shadow: 1024, shadowEvery: 3, bloom: true,  planar: 1.0, maxScale: 0.85, foam: 1.0 },
-  low:    { name: 'Fast',   reflScale: 0.00, cloudRefl: 0, msaa: 0, shadow: 1024, shadowEvery: 5, bloom: false, planar: 0.0, maxScale: 0.70, foam: 0.9 },
+  ultra:  { name: 'Ultra',  reflScale: 0.85, cloudRefl: 1, msaa: 4, shadow: 4096, shadowEvery: 1, bloom: true,  planar: 1.0, maxScale: 1.00, foam: 1.0, detail: 1.15, micro: 1 },
+  high:   { name: 'High',   reflScale: 0.68, cloudRefl: 1, msaa: 4, shadow: 3072, shadowEvery: 1, bloom: true,  planar: 1.0, maxScale: 1.00, foam: 1.0, detail: 1.00, micro: 1 },
+  medium: { name: 'Medium', reflScale: 0.44, cloudRefl: 0, msaa: 2, shadow: 1024, shadowEvery: 3, bloom: true,  planar: 1.0, maxScale: 0.85, foam: 1.0, detail: 0.90, micro: 0 },
+  low:    { name: 'Fast',   reflScale: 0.00, cloudRefl: 0, msaa: 0, shadow: 1024, shadowEvery: 5, bloom: false, planar: 0.0, maxScale: 0.70, foam: 0.9, detail: 0.75, micro: 0 },
 };
-const TIER_ORDER = ['high', 'medium', 'low'];
+const TIER_ORDER = ['ultra', 'high', 'medium', 'low'];
 
 const perf = {
   tier: 'high',
@@ -252,7 +293,7 @@ const perf = {
   basePixelRatio: Math.min(devicePixelRatio || 1, 2),
   frameMs: 16.7,
   adjustTimer: 0,
-  autoTiered: false,
+  demoted: false,      // once the tuner has had to give ground, it stops climbing
   frames: 0,
 };
 
@@ -273,6 +314,8 @@ function applyTier(name) {
   ocean.uniforms.uCloudReflections.value = t.cloudRefl;
   ocean.uniforms.uPlanarStrength.value = t.planar;
   ocean.uniforms.uFoamAmount.value = t.foam;
+  ocean.uniforms.uDetailStrength.value = t.detail;
+  ocean.uniforms.uMicroDetail.value = t.micro;
   post.enabled = t.bloom;
   post.setSamples(t.msaa);
   sky.setShadowSize(t.shadow);
@@ -320,6 +363,7 @@ function autoTune(dt, rawMs) {
   const FLOOR = 0.5;
 
   if (slow) {
+    perf.demoted = true;
     if (dire && canTier) {
       // far off the pace: shedding features beats shaving pixels
       perf.scale = 1.0;
@@ -336,6 +380,12 @@ function autoTune(dt, rawMs) {
   } else if (fast && perf.scale < tier.maxScale) {
     perf.scale = Math.min(tier.maxScale, perf.scale + 0.06);
     resize();
+  } else if (i > 0 && !perf.demoted && perf.frameMs < 9.5 && perf.scale >= tier.maxScale) {
+    // Room to spare and nothing has ever had to be given back — climb. The
+    // demoted latch is what stops this becoming an oscillator on a machine
+    // that sits right on the boundary.
+    applyTier(TIER_ORDER[i - 1]);
+    hud.toast(`Quality: ${TIERS[perf.tier].name}`, 1.8);
   }
 }
 
@@ -377,11 +427,19 @@ function hotkeys() {
   if (input.down('Minus')) setWind(-2.5);
   if (input.down('Equal')) setWind(2.5);
   if (input.tapped('KeyR')) {
-    boat.position.set(0, 0, 280);
-    boat.heading = Math.PI; boat.surge = 0; boat.sway = 0; boat.yawRate = 0; boat.heel = 0;
+    restart(boat, 0, 280);
+    restart(rival, -26, 292);
+    skipper.mark = 0; skipper.finished = false; skipper.finishTime = null;
+    skipper.tack = -1; skipper.sinceTack = 99;
     state.currentMark = 0; state.raceStart = null; state.raceTime = 0; state.finished = false;
     hud.toast('Back to the start');
   }
+}
+
+function restart(b, x, z) {
+  b.position.set(x, 0, z);
+  b.heading = Math.PI;
+  b.surge = 0; b.sway = 0; b.yawRate = 0; b.heel = 0; b.heelRate = 0; b.rudder = 0;
 }
 
 let sunTimer = 0;
@@ -417,6 +475,8 @@ function loop(now) {
   state.time += dt;
   if (state.paused) {
     // keep the sea alive behind the title card
+    boat.updateVisual(dt, state.time);
+    rival.updateVisual(dt, state.time);
     updateCourse(dt);
     updateCamera(dt);
     birds(state.time);
@@ -443,12 +503,22 @@ function loop(now) {
   const steps = Math.min(10, Math.max(1, Math.ceil(dt / 0.020)));
   const sub = dt / steps;
   let rig;
+  const helm = skipper.update(dt, state.wind, t, boat);
   for (let i = 0; i < steps; i++) {
-    rig = boat.update(sub, input, state.wind, t - dt + sub * (i + 1));
+    const st = t - dt + sub * (i + 1);
+    rig = boat.update(sub, input, state.wind, st);
+    rival.update(sub, helm, state.wind, st);
   }
+
+  // Sails, buoyancy and pose are per-frame work: rebuilding them once per
+  // substep is ten times the cost for an image nobody sees.
+  boat.updateVisual(dt, t);
+  rival.updateVisual(dt, t);
 
   heading2.set(Math.sin(boat.heading), Math.cos(boat.heading));
   wake.update(dt, boat.position, heading2, Math.abs(boat.surge), 9.5);
+  heading2.set(Math.sin(rival.heading), Math.cos(rival.heading));
+  rivalWake.update(dt, rival.position, heading2, Math.abs(rival.surge), 9.5);
 
   updateCourse(dt);
   updateCamera(dt);
@@ -459,6 +529,8 @@ function loop(now) {
   hud.update({ boat, wind: state.wind, boomAngle: rig.boomAngle * rig.tackSign, tackSign: rig.tackSign, time: t });
   hud.el.mark.textContent = state.finished ? 'Complete' : state.marks[state.currentMark].name;
   hud.el.timer.textContent = state.raceStart === null ? '--:--' : fmtTime(state.raceTime);
+  hud.updateRival(courseRemaining(state.currentMark, boat.position), skipper.remaining(),
+    state.finished, skipper.finished);
 
   fpsAcc += rawMs / 1000; fpsCount++;
   if (fpsAcc > 0.5) {
@@ -485,7 +557,7 @@ function renderScene(dt, t) {
   sky.setShadowFocus(boat ? boat.position : new THREE.Vector3());
   sky.dome.position.copy(camera.position);
 
-  ocean.update(camera, wake);
+  ocean.update(camera, wake, rivalWake);
   ocean.renderAuxiliary(renderer, scene, camera, [ocean.mesh, sky.dome], {
     refraction: needsRefraction(),
     reflection: TIERS[perf.tier].reflScale > 0,
@@ -507,6 +579,7 @@ function renderScene(dt, t) {
 // handy for tuning from the console
 window.__leeward = { get scene() { return scene; }, get renderer() { return renderer; },
   get camera() { return camera; }, get ocean() { return ocean; }, get boat() { return boat; },
+  get rival() { return rival; }, get skipper() { return skipper; }, get input() { return input; },
   get sky() { return sky; }, get post() { return post; }, state, perf, TIERS,
   setTier: (n) => applyTier(n), THREE };
 

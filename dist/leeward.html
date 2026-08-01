@@ -78,6 +78,13 @@
   #mark { font-size: 15px; font-weight: 400; }
   #timer { font-family: var(--data); font-size: 21px; font-weight: 400; font-variant-numeric: tabular-nums;
     margin-top: 4px; letter-spacing: 0.01em; }
+  #rival { display: flex; justify-content: space-between; align-items: baseline; gap: 14px;
+    margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--edge);
+    font-size: 10px; letter-spacing: 0.18em; color: var(--dim); text-transform: uppercase; }
+  #rival-gap { font-family: var(--data); font-size: 12px; letter-spacing: 0.04em;
+    font-variant-numeric: tabular-nums; color: var(--ink); text-transform: none; }
+  #rival-gap.ahead { color: var(--chart); }
+  #rival-gap.astern { color: var(--signal); }
 
   /* ---- top right: keys ---- */
   #help { position: absolute; top: 22px; right: 22px; padding: 13px 16px; font-size: 11.5px; line-height: 1.85; color: var(--dim); }
@@ -136,6 +143,7 @@
     <h4>Course</h4>
     <div id="mark">—</div>
     <div id="timer">--:--</div>
+    <div id="rival"><span>vs Mistral</span><span id="rival-gap">—</span></div>
   </div>
 
   <div id="help" class="panel">
@@ -175,7 +183,7 @@
     <h1>LEEWARD</h1>
     <div class="sub">A first-person sailing game</div>
     <p class="desc">
-      风从右舷来。松开舵，让船借着涌浪滑向海湾里的小镇。<br>
+      风从右舷来。绕五个浮标一圈，和对手 <i>Mistral</i> 比一场。<br>
       Real apparent-wind sailing — you cannot point closer than 40° to the breeze.<br>
       <span style="opacity:.62;font-size:12.5px">A / D 舵 · W / S 帆 · 鼠标拖动转头 · C 切视角 · F 画质</span>
     </p>
@@ -1908,8 +1916,8 @@ const {SKY_SAMPLE_GLSL,CLOUD_GLSL} = __m_atmosphere;
  * subsurface scattering, and four separate sources of foam.
  */
 
-const RINGS = 224;
-const SEGMENTS = 288;
+const RINGS = 240;
+const SEGMENTS = 320;
 const R_MAX = 9500;
 const R_NEAR = 300;
 
@@ -2001,9 +2009,14 @@ class Ocean {
       uNear: { value: 0.15 },
       uFar: { value: 30000 },
 
+      // two wake buffers: one per boat on the water
       uWake: { value: null },
       uWakeCenter: { value: new THREE.Vector2() },
       uWakeRegion: { value: 320 },
+      uWake2: { value: null },
+      uWakeCenter2: { value: new THREE.Vector2() },
+      uWakeRegion2: { value: 320 },
+      uWake2Valid: { value: 0 },
 
       uExtinction: { value: new THREE.Vector3(0.42, 0.115, 0.058) },
       uScatterColor: { value: new THREE.Color(0.045, 0.21, 0.235) },
@@ -2013,6 +2026,7 @@ class Ocean {
       uRefractionValid: { value: 1.0 },
       uCloudReflections: { value: 1.0 },
       uDetailStrength: { value: 1.0 },
+      uMicroDetail: { value: 1.0 },
       uDebug: { value: 0 },
     };
 
@@ -2100,10 +2114,10 @@ class Ocean {
       ${CLOUD_GLSL}
 
       uniform float uSunIntensity;
-      uniform sampler2D uWaterNormal, uFoamTex, uReflection, uRefraction, uDepthTex, uWake;
-      uniform vec2 uResolution, uWindDir, uWakeCenter;
-      uniform float uNear, uFar, uTime, uWindSpeed, uWakeRegion;
-      uniform float uFoamAmount, uCloudReflections, uDetailStrength;
+      uniform sampler2D uWaterNormal, uFoamTex, uReflection, uRefraction, uDepthTex, uWake, uWake2;
+      uniform vec2 uResolution, uWindDir, uWakeCenter, uWakeCenter2;
+      uniform float uNear, uFar, uTime, uWindSpeed, uWakeRegion, uWakeRegion2, uWake2Valid;
+      uniform float uFoamAmount, uCloudReflections, uDetailStrength, uMicroDetail;
       uniform float uPlanarStrength, uRefractionValid;
       uniform float uDebug;
       uniform vec3 uExtinction;
@@ -2148,6 +2162,17 @@ class Ocean {
         float f4 = smoothstep(80.0, 280.0, dist);
 
         vec3 n = n1 * (1.0 - f4 * 0.45) + n2 * (0.72 * f2) + n3 * (0.46 * f3) + n4 * (0.85 * f4);
+
+        // A fifth band, for the couple of boat-lengths you can actually reach
+        // out and touch. Capillary ripple this fine is invisible past the
+        // foredeck, so it is the first thing the quality tiers drop.
+        if (uMicroDetail > 0.5) {
+          float f5 = 1.0 - smoothstep(5.0, 26.0, dist);
+          if (f5 > 0.002) {
+            n += unpackNormal(texture2D(uWaterNormal, p * 2.35 - perp * t * 0.088 + 0.13)) * (0.40 * f5);
+          }
+        }
+
         n.xz *= strength;
         n.y = max(n.y, 0.35);
         return normalize(n);
@@ -2282,6 +2307,11 @@ class Ocean {
         vec2 wuv = (vWorld.xz - uWakeCenter) / uWakeRegion + 0.5;
         float inWake = step(0.0, wuv.x) * step(wuv.x, 1.0) * step(0.0, wuv.y) * step(wuv.y, 1.0);
         float wake = texture2D(uWake, clamp(wuv, 0.0, 1.0)).r * inWake;
+        if (uWake2Valid > 0.5) {
+          vec2 wuv2 = (vWorld.xz - uWakeCenter2) / uWakeRegion2 + 0.5;
+          float in2 = step(0.0, wuv2.x) * step(wuv2.x, 1.0) * step(0.0, wuv2.y) * step(wuv2.y, 1.0);
+          wake = max(wake, texture2D(uWake2, clamp(wuv2, 0.0, 1.0)).r * in2);
+        }
 
         float foam = clamp(crest * 0.85 + breaker + shore + wake * 1.15, 0.0, 1.0);
         foam = clamp(foam * (0.42 + 1.05 * bubbles), 0.0, 1.0) * uFoamAmount;
@@ -2316,8 +2346,8 @@ class Ocean {
   setSize(width, height, auxScale = 0.55) {
     this.uniforms.uResolution.value.set(width, height);
     const scale = auxScale > 0 ? auxScale : 0.3;
-    const rw = Math.max(160, Math.min(1600, Math.floor(width * scale)));
-    const rh = Math.max(160, Math.min(1600, Math.floor(height * scale)));
+    const rw = Math.max(160, Math.min(2048, Math.floor(width * scale)));
+    const rh = Math.max(160, Math.min(2048, Math.floor(height * scale)));
     this.reflectionRT.setSize(rw, rh);
     this.refractionRT.setSize(rw, rh);
     this.refractionRT.depthTexture.image.width = rw;
@@ -2395,12 +2425,21 @@ class Ocean {
     this.uniforms.uFar.value = camera.far;
   }
 
-  update(camera, wake) {
+  update(camera, wake, wake2) {
     this.uniforms.uCenter.value.set(camera.position.x, camera.position.z);
     if (wake) {
       this.uniforms.uWake.value = wake.texture;
       this.uniforms.uWakeCenter.value.copy(wake.center);
       this.uniforms.uWakeRegion.value = wake.region;
+    }
+    this.uniforms.uWake2Valid.value = wake2 ? 1 : 0;
+    if (wake2) {
+      this.uniforms.uWake2.value = wake2.texture;
+      this.uniforms.uWakeCenter2.value.copy(wake2.center);
+      this.uniforms.uWakeRegion2.value = wake2.region;
+    } else if (!this.uniforms.uWake2.value) {
+      // a sampler still has to be bound even when the branch never runs
+      this.uniforms.uWake2.value = wake ? wake.texture : null;
     }
   }
 }
@@ -2583,7 +2622,7 @@ const THREE = __THREE;
 const {applyAtmosphere} = __m_materials;
 const {sampleOcean} = __m_waves;
 const {terrainHeight} = __m_terrain;
-const {clamp,damp,angleDelta,makeRng} = __m_utils;
+const {clamp,damp,smoothstep,mergeGeometries,prepare,trs} = __m_utils;
 
 /**
  * A 9.5 metre sloop, and enough sailing physics to make her feel like one.
@@ -2593,6 +2632,12 @@ const {clamp,damp,angleDelta,makeRng} = __m_utils;
  * genuinely cannot sail closer than about 40 degrees off the breeze. Lift and
  * drag are taken from a flat-plate model of the sail, which gives lift-driven
  * beating and reaching and drag-driven running out of the same equations.
+ *
+ * Everything on deck that never moves relative to the hull is baked into three
+ * merged meshes — glossy paint, matte joinery, bright metal — so a fully
+ * detailed yacht costs three draw calls instead of forty. That matters here
+ * because every boat is drawn three times a frame: once for the camera, once
+ * into the water's mirror, once into its refraction buffer.
  */
 
 const RHO_AIR = 1.225;
@@ -2600,113 +2645,172 @@ const RHO_WATER = 1025;
 const G = 9.81;
 
 const LOA = 9.5;       // length overall
-const LWL = 8.4;       // waterline length
+const LWL = 8.4;              // waterline length
 const BEAM = 3.05;
-const MASS = 3200;     // kg displacement
-const IZ = 21000;      // yaw inertia
-const SAIL_AREA = 42;  // main + jib
-const CE_HEIGHT = 5.0; // centre of effort above the lateral centre
-const GM = 1.15;       // metacentric height
+const MASS = 3200;            // kg displacement
+const IZ = 21000;             // yaw inertia
+const SAIL_AREA = 42;         // main + jib
+const CE_HEIGHT = 5.0;        // centre of effort above the lateral centre
+const GM = 1.15;              // metacentric height
 const HULL_SPEED = 1.34 * Math.sqrt(LWL * 3.28084) / 1.94384; // m/s
 
+/**
+ * Paint schemes. Only the hull, the sailcloth and the burgee change between
+ * boats; the deck gear is the same chandlery on both.
+ */
+const LIVERIES = {
+  player: {
+    topside: 0xf0efea, sheerStripe: 0x9c3a2d, cove: 0xc7a24c,
+    boot: 0x161d26, anti: 0x1d3350, deck: 0xae8b5d,
+    sail: 0xdedad0, sailNumber: 'SUI 6', burgee: 0xd94a3d,
+  },
+  rival: {
+    topside: 0x1f3a56, sheerStripe: 0xd6c489, cove: 0xe4e2dc,
+    boot: 0x0e1620, anti: 0x143028, deck: 0x9a7f57,
+    sail: 0xd6d1c3, sailNumber: 'FRA 9', burgee: 0xf0b45c,
+  },
+};
+
 // ---------------------------------------------------------------------------
-// hull construction
+// hull lines
 // ---------------------------------------------------------------------------
 
-/** Half-beam at station t (0 = transom, 1 = stem). */
+/** Half-beam at station t (0 = transom, 1 = stem). Widest just aft of amidships. */
 function beamAt(t) {
-  const shape = Math.pow(Math.max(0, Math.sin(Math.PI * Math.pow(t, 0.72))), 0.62);
-  const transom = 0.55 * (1 - Math.min(1, t / 0.16));
+  const shape = Math.pow(Math.max(0, Math.sin(Math.PI * Math.pow(t, 0.70))), 0.58);
+  const transom = 0.62 * (1 - smoothstep(0.0, 0.20, t));
   return (BEAM / 2) * Math.max(shape, transom);
 }
 /** Depth of the canoe body below the waterline. */
 function depthAt(t) {
-  return 0.30 + 0.52 * Math.pow(Math.max(0, Math.sin(Math.PI * Math.pow(t, 0.62))), 0.5);
+  return 0.28 + 0.56 * Math.pow(Math.max(0, Math.sin(Math.PI * Math.pow(t, 0.58))), 0.55);
 }
 /** Sheer height above the waterline — the curve that gives a hull its face. */
 function sheerAt(t) {
-  return 0.86 + 0.55 * Math.pow(t, 2.6) + 0.09 * Math.pow(1 - t, 2);
+  return 0.84 + 0.62 * Math.pow(t, 2.4) + 0.10 * Math.pow(1 - t, 2.2);
+}
+/**
+ * How much the topsides lean outboard. Positive forward, so the bow sections
+ * flare and throw spray clear; slightly negative aft, which is the tumblehome
+ * that keeps a wide stern from looking like a box.
+ */
+function flareAt(t) {
+  return 0.22 * smoothstep(0.52, 1.0, t) - 0.08 * smoothstep(0.42, 0.02, t);
 }
 
-function buildHull() {
-  const NS = 40, NG = 14;
+function buildHull(livery) {
+  const NS = 52, NG = 16, NW = 9;
   const pos = [];
   const col = [];
   const idx = [];
-  const white = new THREE.Color(0xf3f2ef);
-  const navy = new THREE.Color(0x1b2f4a);
-  const stripe = new THREE.Color(0x8d2f2a);
 
+  const cTop = new THREE.Color(livery.topside);
+  const cSheer = new THREE.Color(livery.sheerStripe);
+  const cCove = new THREE.Color(livery.cove);
+  const cBoot = new THREE.Color(livery.boot);
+  const cAnti = new THREE.Color(livery.anti);
+  const cDeck = new THREE.Color(livery.deck);
+  const cMargin = new THREE.Color(0xeceae4);
+
+  // ---- station grid ----
   const grid = [];
+  const sheers = [];
   for (let i = 0; i <= NS; i++) {
     const t = i / NS;
-    const z = (t - 0.5) * LOA;
-    const B = beamAt(t), D = depthAt(t), S = sheerAt(t);
+    const B = beamAt(t), D = depthAt(t), S = sheerAt(t), fl = flareAt(t);
+    const z0 = (t - 0.5) * LOA;
     const row = [];
     for (let j = 0; j <= NG; j++) {
-      const s = j / NG;
-      const a = s * Math.PI / 2;
-      const x = B * Math.pow(Math.sin(a), 0.78);
-      const y = -D * Math.pow(Math.cos(a), 1.7) + (S + D) * Math.pow(Math.sin(a), 2.3);
+      const a = (j / NG) * Math.PI / 2;
+      let x = B * Math.pow(Math.sin(a), 0.74);
+      const y = -D * Math.pow(Math.cos(a), 1.75) + (S + D) * Math.pow(Math.sin(a), 2.35);
+      // flare and tumblehome act on the topsides only, never on the canoe body
+      const above = clamp(y / Math.max(S, 0.001), 0, 1);
+      x *= 1 + fl * above * above;
+      // the stem overhangs forward and the transom leans aft, both with height
+      const z = z0
+        + 0.24 * smoothstep(0.74, 1.0, t) * Math.max(0, y)
+        - 0.32 * smoothstep(0.18, 0.0, t) * Math.max(0, y);
       row.push(new THREE.Vector3(x, y, z));
     }
-    grid.push(row);
-  }
-  // correct the sheer: the outermost girth point should land exactly on it
-  for (let i = 0; i <= NS; i++) {
-    const t = i / NS;
-    const S = sheerAt(t);
-    const row = grid[i];
+    // land the outermost girth point exactly on the sheer line
     const dy = S - row[NG].y;
     for (let j = 0; j <= NG; j++) row[j].y += dy * Math.pow(j / NG, 1.6);
+    grid.push(row);
+    sheers.push(S);
   }
 
-  const colorFor = (y) => {
-    if (y < -0.06) return navy;
-    if (y < 0.06) return stripe;
-    return white;
-  };
-
   let base = 0;
-  const pushVert = (v) => {
+  const push = (v, c) => {
     pos.push(v.x, v.y, v.z);
-    const c = colorFor(v.y);
     col.push(c.r, c.g, c.b);
     return base++;
   };
 
-  // both sides
+  /**
+   * Topside paint, read off the distance below the sheer rather than off an
+   * absolute height — that is what makes the cove stripe follow the sheer
+   * spring instead of cutting across it.
+   */
+  const hullColor = (y, S) => {
+    if (y < -0.055) return cAnti;
+    if (y < 0.055) return cBoot;
+    const d = S - y;
+    if (d < 0.05) return cSheer;
+    if (Math.abs(d - 0.30) < 0.021) return cCove;
+    return cTop;
+  };
+
+  // ---- shell, both sides ----
   for (const side of [1, -1]) {
     const start = base;
     for (let i = 0; i <= NS; i++) {
       for (let j = 0; j <= NG; j++) {
         const v = grid[i][j];
-        pushVert(new THREE.Vector3(v.x * side, v.y, v.z));
+        push(_bv.set(v.x * side, v.y, v.z), hullColor(v.y, sheers[i]));
       }
     }
     for (let i = 0; i < NS; i++) {
       for (let j = 0; j < NG; j++) {
         const a = start + i * (NG + 1) + j;
-        const b = a + 1;
-        const c = a + (NG + 1);
-        const d = c + 1;
-        if (side > 0) { idx.push(a, b, c, b, d, c); }
-        else { idx.push(a, c, b, b, c, d); }
+        const b = a + 1, c = a + (NG + 1), d = c + 1;
+        if (side > 0) idx.push(a, b, c, b, d, c);
+        else idx.push(a, c, b, b, c, d);
       }
     }
   }
 
-  // deck: span the two sheer lines with a cambered surface
+  // ---- transom: a ruled surface straight across the aftmost station ----
   {
     const start = base;
-    const NW = 7;
+    const row = grid[0];
+    for (let j = 0; j <= NG; j++) {
+      const v = row[j];
+      const c = hullColor(v.y, sheers[0]);
+      push(_bv.set(v.x, v.y, v.z), c);
+      push(_bv.set(-v.x, v.y, v.z), c);
+    }
+    for (let j = 0; j < NG; j++) {
+      const s0 = start + j * 2, p0 = s0 + 1, s1 = s0 + 2, p1 = s0 + 3;
+      idx.push(s0, p0, s1, p0, p1, s1);
+    }
+  }
+
+  // ---- deck: span the two sheer lines with a cambered surface ----
+  {
+    const start = base;
     for (let i = 0; i <= NS; i++) {
-      const t = i / NS;
-      const B = beamAt(t) * 0.995, S = sheerAt(t);
+      const outer = grid[i][NG];
       for (let j = 0; j <= NW; j++) {
-        const f = (j / NW) * 2 - 1;          // -1 port .. 1 starboard
-        const camber = (1 - f * f) * 0.11;
-        pushVert(new THREE.Vector3(B * f, S + camber, (t - 0.5) * LOA));
+        const f = (j / NW) * 2 - 1;                    // -1 port .. +1 starboard
+        const edge = Math.abs(f);
+        const camber = (1 - f * f) * 0.10;
+        // nonskid in the middle, a painted margin at the toe rail, and the
+        // faint plank lines of a laid teak deck
+        const c = edge > 0.86
+          ? cMargin
+          : _bc.copy(cDeck).multiplyScalar(j % 2 ? 0.93 : 1.05);
+        push(_bv.set(outer.x * f, outer.y + camber - 0.01, outer.z), c);
       }
     }
     for (let i = 0; i < NS; i++) {
@@ -2714,13 +2818,6 @@ function buildHull() {
         const a = start + i * (NW + 1) + j;
         idx.push(a, a + (NW + 1), a + 1, a + 1, a + (NW + 1), a + NW + 2);
       }
-    }
-    // paint the deck teak-ish, leaving a white margin at the toe rail
-    for (let i = start; i < base; i++) {
-      const j = (i - start) % (NW + 1);
-      const edge = Math.abs((j / NW) * 2 - 1);
-      const c = edge > 0.82 ? new THREE.Color(0xeceae4) : new THREE.Color(0xb08d5f).multiplyScalar(j % 2 ? 0.94 : 1.04);
-      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
     }
   }
 
@@ -2732,11 +2829,140 @@ function buildHull() {
   return g;
 }
 
+/**
+ * A low bulwark around the deck edge, swept along the sheer. It is a closed
+ * rectangular section rather than a single wall: a one-sided strip vanishes
+ * the moment you stand inboard of it and look down, which is where the
+ * helmsman spends the whole game.
+ */
+function buildToeRail(height = 0.085, width = 0.055, inset = 0.03) {
+  const NS = 52;
+  const pos = [], idx = [];
+  let base = 0;
+  for (const side of [1, -1]) {
+    const start = base;
+    for (let i = 0; i <= NS; i++) {
+      const t = i / NS;
+      const S = sheerAt(t);
+      const outer = beamAt(t) * (1 + flareAt(t)) - inset;
+      const inner = outer - width;
+      const z = (t - 0.5) * LOA
+        + 0.24 * smoothstep(0.74, 1.0, t) * S
+        - 0.32 * smoothstep(0.18, 0.0, t) * S;
+      // section corners, walked anticlockwise seen from ahead
+      for (const [x, y] of [[outer, S], [outer, S + height], [inner, S + height], [inner, S]]) {
+        pos.push(x * side, y, z);
+      }
+      base += 4;
+    }
+    for (let i = 0; i < NS; i++) {
+      for (let k = 0; k < 4; k++) {
+        const a = start + i * 4 + k;
+        const b = start + i * 4 + ((k + 1) % 4);
+        const c = a + 4, d = b + 4;
+        if (side > 0) idx.push(a, b, c, b, d, c);
+        else idx.push(a, c, b, b, c, d);
+      }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+/** A stainless tube following a path — pulpits, pushpits, grab rails. */
+function tube(points, radius = 0.021) {
+  const curve = new THREE.CatmullRomCurve3(points.map((p) => new THREE.Vector3(...p)));
+  return new THREE.TubeGeometry(curve, Math.max(8, points.length * 3), radius, 6, false);
+}
+
+// ---------------------------------------------------------------------------
+// sailcloth
+// ---------------------------------------------------------------------------
+
+/**
+ * Sailcloth as a texture: woven laminate, the horizontal broadseams of a
+ * cross-cut sail, batten pockets running in from the leech, and the class
+ * number. The sail's UVs are (chord, hoist), so all of this lands where a
+ * sailmaker would have put it.
+ */
+function makeSailTexture(livery, withNumber) {
+  const S = 512;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = S;
+  const g = cv.getContext('2d');
+  const base = new THREE.Color(livery.sail);
+
+  g.fillStyle = `#${base.getHexString()}`;
+  g.fillRect(0, 0, S, S);
+
+  // weave: a fine crosshatch, barely there but it kills the plastic look
+  const img = g.getImageData(0, 0, S, S);
+  const d = img.data;
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const i = (y * S + x) * 4;
+      const w = (Math.sin(x * 1.9) * Math.sin(y * 1.9)) * 3.5 + (Math.random() - 0.5) * 5;
+      d[i] = clamp(d[i] + w, 0, 255);
+      d[i + 1] = clamp(d[i + 1] + w, 0, 255);
+      d[i + 2] = clamp(d[i + 2] + w, 0, 255);
+    }
+  }
+  g.putImageData(img, 0, 0);
+
+  // broadseams, parallel to the foot
+  g.strokeStyle = 'rgba(20,28,40,0.11)';
+  g.lineWidth = 1.5;
+  for (let k = 1; k < 11; k++) {
+    const y = S - (k / 11) * S;
+    g.beginPath(); g.moveTo(0, y); g.lineTo(S, y); g.stroke();
+  }
+
+  // batten pockets: doubled cloth from the leech, stopping short of the luff
+  g.fillStyle = 'rgba(20,28,40,0.10)';
+  for (const v of [0.20, 0.42, 0.63, 0.83]) {
+    const y = S - v * S;
+    g.fillRect(S * 0.30, y - 4, S * 0.70, 8);
+  }
+
+  // luff tape and leech line
+  g.fillStyle = 'rgba(20,28,40,0.13)';
+  g.fillRect(0, 0, 8, S);
+  g.fillRect(S - 6, 0, 6, S);
+
+  if (withNumber) {
+    g.save();
+    g.translate(S * 0.50, S * 0.56);
+    g.rotate(-0.06);
+    g.fillStyle = 'rgba(24,32,44,0.80)';
+    g.font = '700 74px ui-monospace, "SF Mono", Menlo, Consolas, monospace';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(livery.sailNumber, 0, 0);
+    g.restore();
+  }
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  return tex;
+}
+
 /** Triangular sail from three corners, with camber, roach and a luff flutter. */
-function sailGeometry(nU = 9, nV = 11) {
+function sailGeometry(nU = 12, nV = 16) {
   const g = new THREE.BufferGeometry();
   const verts = new Float32Array((nU + 1) * (nV + 1) * 3);
+  const uvs = new Float32Array((nU + 1) * (nV + 1) * 2);
   const idx = [];
+  let k = 0;
+  for (let v = 0; v <= nV; v++) {
+    for (let u = 0; u <= nU; u++) {
+      uvs[k++] = u / nU;
+      uvs[k++] = v / nV;
+    }
+  }
   for (let v = 0; v < nV; v++) {
     for (let u = 0; u < nU; u++) {
       const a = v * (nU + 1) + u;
@@ -2744,6 +2970,7 @@ function sailGeometry(nU = 9, nV = 11) {
     }
   }
   g.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
   g.setIndex(idx);
   g.userData = { nU, nV };
   return g;
@@ -2752,6 +2979,8 @@ function sailGeometry(nU = 9, nV = 11) {
 const _t = new THREE.Vector3(), _h = new THREE.Vector3(), _c = new THREE.Vector3();
 const _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3(), _nrm = new THREE.Vector3();
 const _p = new THREE.Vector3();
+const _bv = new THREE.Vector3();
+const _bc = new THREE.Color();
 
 function updateSail(geo, tack, head, clew, camber, roach, flutter, time) {
   const { nU, nV } = geo.userData;
@@ -2789,14 +3018,20 @@ function updateSail(geo, tack, head, clew, camber, roach, flutter, time) {
 // ---------------------------------------------------------------------------
 
 class Boat {
-  constructor(scene) {
+  constructor(scene, opts = {}) {
+    this.livery = opts.livery || LIVERIES.player;
+    this.name = opts.name || 'Leeward';
+    // a rival is not quite as quick as the player's boat: close enough to make
+    // a race of it, slow enough that sailing well beats her
+    this.efficiency = opts.efficiency ?? 1.0;
+
     this.root = new THREE.Group();
     this.root.rotation.order = 'YXZ';
     scene.add(this.root);
 
-    // state
     this.position = new THREE.Vector3(0, 0, 280);
-    this.heading = Math.PI;      // pointing at the island
+    if (opts.position) this.position.copy(opts.position);
+    this.heading = opts.heading ?? Math.PI;
     this.surge = 0;
     this.sway = 0;
     this.yawRate = 0;
@@ -2812,139 +3047,261 @@ class Boat {
     this.apparent = { speed: 0, angle: 0 };
     this.luffing = 0;
     this.driveForce = 0;
+    this._rig = { boomAngle: 0, tackSign: 1, beta: 0 };
 
     this.build();
   }
 
   build() {
-    const hullMat = applyAtmosphere(new THREE.MeshPhysicalMaterial({
-      vertexColors: true, roughness: 0.28, metalness: 0.0,
-      clearcoat: 0.85, clearcoatRoughness: 0.12,
-    }));
-    const hull = new THREE.Mesh(buildHull(), hullMat);
-    hull.castShadow = true;
-    hull.receiveShadow = true;
-    this.root.add(hull);
+    const L = this.livery;
 
-    const white = applyAtmosphere(new THREE.MeshStandardMaterial({ color: 0xeeece6, roughness: 0.45 }));
-    const alloy = applyAtmosphere(new THREE.MeshStandardMaterial({ color: 0xb9bcc0, roughness: 0.32, metalness: 0.85 }));
-    const teak = applyAtmosphere(new THREE.MeshStandardMaterial({ color: 0x8a6a42, roughness: 0.72 }));
-    const dark = applyAtmosphere(new THREE.MeshStandardMaterial({ color: 0x24262b, roughness: 0.5 }));
-    // Sailcloth: bright but not blown out, so the camber still reads as shape.
-    // The small emissive stands in for transmission — real sailcloth passes
-    // light, so the windward face is never as dark as an opaque surface.
-    this.sailMat = applyAtmosphere(new THREE.MeshStandardMaterial({
-      color: 0xc9c7c0, roughness: 0.9, metalness: 0.0, side: THREE.DoubleSide,
-      envMapIntensity: 0.5, emissive: 0xdfe4e8, emissiveIntensity: 0.11,
+    // Three materials for the whole boat. Vertex colours carry the paint, so
+    // the split is by *finish*, not by part: gloss gelcoat, matte joinery,
+    // bright metal.
+    const gloss = applyAtmosphere(new THREE.MeshPhysicalMaterial({
+      vertexColors: true, roughness: 0.26, metalness: 0.0,
+      clearcoat: 0.9, clearcoatRoughness: 0.10,
+    }));
+    const matte = applyAtmosphere(new THREE.MeshStandardMaterial({
+      vertexColors: true, roughness: 0.72, metalness: 0.0,
+    }));
+    const metal = applyAtmosphere(new THREE.MeshStandardMaterial({
+      vertexColors: true, roughness: 0.30, metalness: 0.86,
     }));
 
-    const add = (geo, mat, x, y, z, rx = 0, ry = 0, rz = 0, parent = this.root) => {
-      const m = new THREE.Mesh(geo, mat);
-      m.position.set(x, y, z);
-      m.rotation.set(rx, ry, rz);
-      m.castShadow = true;
-      parent.add(m);
-      return m;
+    const ALLOY = 0xb9bcc0, STEEL = 0xd2d5d8, TEAK = 0x8a6a42, DARK = 0x22252a;
+    const GRP = 0xefeee9, GLASS = 0x12161c;
+
+    const parts = { gloss: [], matte: [], metal: [] };
+    /** Bake a piece into one of the three buckets. Colour undefined = keep its own. */
+    const put = (bucket, geo, matrix, color) => {
+      parts[bucket].push(color === undefined ? bakeVertexColored(geo, matrix) : prepare(geo, matrix, color));
     };
+    const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+    const cyl = (rt, rb, h, s = 10) => new THREE.CylinderGeometry(rt, rb, h, s);
 
-    // coachroof, hatch and companionway
-    add(new THREE.BoxGeometry(1.95, 0.58, 3.6), white, 0, 1.24, 1.15);
-    add(new THREE.BoxGeometry(1.70, 0.10, 3.35), white, 0, 1.55, 1.12);
-    add(new THREE.BoxGeometry(0.80, 0.06, 0.85), alloy, 0, 1.62, 2.35);   // sliding hatch
-    add(new THREE.BoxGeometry(2.00, 0.30, 0.10), dark, 0, 1.24, 2.96);    // forward window
-    add(new THREE.BoxGeometry(0.10, 0.26, 2.60), dark, 0.99, 1.24, 1.15);
-    add(new THREE.BoxGeometry(0.10, 0.26, 2.60), dark, -0.99, 1.24, 1.15);
-    add(new THREE.BoxGeometry(0.86, 0.52, 0.09), teak, 0, 1.20, -0.69);   // washboards
-    add(new THREE.BoxGeometry(1.02, 0.09, 0.16), teak, 0, 0.92, -0.70);   // bridgedeck
-    // cockpit coaming
-    add(new THREE.BoxGeometry(0.16, 0.34, 3.4), white, 1.02, 1.14, -2.1);
-    add(new THREE.BoxGeometry(0.16, 0.34, 3.4), white, -1.02, 1.14, -2.1);
-    add(new THREE.BoxGeometry(2.2, 0.34, 0.16), white, 0, 1.14, -3.75);
-    // cockpit sole and benches
-    add(new THREE.BoxGeometry(2.0, 0.1, 3.4), teak, 0, 0.62, -2.1);
-    add(new THREE.BoxGeometry(0.5, 0.1, 3.2), teak, 0.72, 0.95, -2.1);
-    add(new THREE.BoxGeometry(0.5, 0.1, 3.2), teak, -0.72, 0.95, -2.1);
+    // ---- hull, toe rail ----
+    put('gloss', buildHull(L), null);
+    put('gloss', buildToeRail(), null, GRP);
 
-    // mast, boom, spreaders
-    this.mastBase = new THREE.Vector3(0, 1.6, 1.05);
-    this.mastHeight = 12.6;
-    add(new THREE.CylinderGeometry(0.11, 0.14, this.mastHeight, 12), alloy,
-      this.mastBase.x, this.mastBase.y + this.mastHeight / 2, this.mastBase.z);
-    add(new THREE.BoxGeometry(2.6, 0.06, 0.09), alloy, 0, this.mastBase.y + 7.2, this.mastBase.z, 0, 0, 0.04);
+    // ---- coachroof: two stacked tiers so the sides slope inboard ----
+    put('gloss', box(2.02, 0.40, 3.70), trs(0, 1.16, 1.15), GRP);
+    put('gloss', box(1.76, 0.24, 3.52), trs(0, 1.45, 1.15), GRP);
+    put('gloss', box(1.58, 0.07, 3.34), trs(0, 1.60, 1.15), GRP);
+    // long side windows and the forward light
+    put('gloss', box(0.06, 0.20, 2.30), trs(1.00, 1.22, 1.30), GLASS);
+    put('gloss', box(0.06, 0.20, 2.30), trs(-1.00, 1.22, 1.30), GLASS);
+    put('gloss', box(1.40, 0.16, 0.06), trs(0, 1.26, 2.98), GLASS);
+    // sliding hatch and its garage
+    put('metal', box(0.82, 0.05, 0.90), trs(0, 1.655, 2.30), ALLOY);
+    put('metal', box(0.94, 0.04, 0.06), trs(0, 1.64, 1.82), ALLOY);
+    // foredeck hatch
+    put('metal', box(0.62, 0.05, 0.62), trs(0, 1.30, 3.55, -0.18, 0, 0), ALLOY);
+    put('gloss', box(0.70, 0.07, 0.70), trs(0, 1.26, 3.55), GLASS);
 
-    this.boomPivot = new THREE.Group();
-    this.boomPivot.position.set(this.mastBase.x, this.mastBase.y + 1.35, this.mastBase.z);
-    this.root.add(this.boomPivot);
-    this.boomLength = 3.95;
-    const boom = add(new THREE.CylinderGeometry(0.075, 0.085, this.boomLength, 10), alloy,
-      0, 0, -this.boomLength / 2, Math.PI / 2, 0, 0, this.boomPivot);
-    boom.castShadow = true;
+    // ---- companionway ----
+    put('matte', box(0.84, 0.54, 0.07), trs(0, 1.22, -0.72), TEAK);
+    put('matte', box(1.00, 0.09, 0.18), trs(0, 0.94, -0.74), TEAK);
 
-    // wheel-less tiller, because you can feel a tiller
-    this.tiller = new THREE.Group();
-    this.tiller.position.set(0, 1.0, -3.5);
-    this.root.add(this.tiller);
-    add(new THREE.CylinderGeometry(0.045, 0.055, 1.5, 8), teak, 0, 0.12, 0.75, Math.PI / 2 - 0.12, 0, 0, this.tiller);
+    // ---- cockpit ----
+    put('gloss', box(0.14, 0.34, 3.30), trs(1.03, 1.10, -2.15), GRP);
+    put('gloss', box(0.14, 0.34, 3.30), trs(-1.03, 1.10, -2.15), GRP);
+    put('gloss', box(2.20, 0.34, 0.14), trs(0, 1.10, -3.78), GRP);
+    put('matte', box(1.96, 0.09, 3.30), trs(0, 0.60, -2.15), TEAK);
+    put('matte', box(0.52, 0.09, 3.10), trs(0.70, 0.94, -2.15), TEAK);
+    put('matte', box(0.52, 0.09, 3.10), trs(-0.70, 0.94, -2.15), TEAK);
+    // locker lids, with a visible seam
+    put('matte', box(0.46, 0.02, 1.30), trs(0.70, 0.995, -2.60), 0x6f563a);
+    put('matte', box(0.46, 0.02, 1.30), trs(-0.70, 0.995, -2.60), 0x6f563a);
 
-    // keel and rudder below the waterline
-    add(new THREE.BoxGeometry(0.22, 1.35, 1.75), dark, 0, -1.05, -0.2);
-    add(new THREE.CapsuleGeometry(0.16, 1.5, 4, 8), dark, 0, -1.72, -0.2, Math.PI / 2, 0, 0);
-    this.rudderMesh = add(new THREE.BoxGeometry(0.09, 1.15, 0.62), dark, 0, -0.62, -3.55);
+    // ---- primary and halyard winches ----
+    const winch = (x, z, r = 0.085, h = 0.17) => {
+      put('metal', cyl(r, r * 1.18, h, 12), trs(x, 1.30, z), STEEL);
+      put('metal', cyl(r * 1.22, r * 1.22, 0.022, 12), trs(x, 1.395, z), ALLOY);
+      // the drum sits on a wedge pad
+      put('gloss', cyl(r * 1.5, r * 1.5, 0.05, 10), trs(x, 1.21, z), GRP);
+    };
+    winch(0.86, -1.55); winch(-0.86, -1.55);            // primaries
+    winch(0.62, 1.62, 0.062, 0.13); winch(-0.62, 1.62, 0.062, 0.13);   // halyards
+    // clutches on the coachroof
+    put('matte', box(0.34, 0.07, 0.10), trs(0.40, 1.655, 1.95), DARK);
+    put('matte', box(0.34, 0.07, 0.10), trs(-0.40, 1.655, 1.95), DARK);
+    // teak handrails, the thing you actually hold going forward in a seaway
+    for (const s of [1, -1]) {
+      put('matte', box(0.05, 0.05, 2.60), trs(s * 0.66, 1.75, 1.15), TEAK);
+      for (const z of [-0.02, 0.75, 1.55, 2.32]) {
+        put('matte', box(0.05, 0.11, 0.08), trs(s * 0.66, 1.665, z), TEAK);
+      }
+    }
 
-    // pulpit, stanchions and lifelines
-    const lifeline = [];
-    for (let i = 0; i <= 12; i++) {
-      const t = i / 12;
-      const zz = -3.9 + t * 8.2;
-      const st = (zz / LOA) + 0.5;
-      const bx = beamAt(clamp(st, 0, 1)) - 0.06;
-      const sy = sheerAt(clamp(st, 0, 1));
+    // ---- cleats and fairleads ----
+    for (const [x, z] of [[1.06, 3.62], [-1.06, 3.62], [1.14, -3.30], [-1.14, -3.30], [1.20, 0.55], [-1.20, 0.55]]) {
+      put('metal', cyl(0.028, 0.028, 0.20, 6), trs(x, 1.02, z, 0, 0, Math.PI / 2), ALLOY);
+      put('metal', cyl(0.026, 0.030, 0.07, 6), trs(x, 0.97, z + 0.05), ALLOY);
+      put('metal', cyl(0.026, 0.030, 0.07, 6), trs(x, 0.97, z - 0.05), ALLOY);
+    }
+
+    // ---- traveler track and mainsheet ----
+    put('metal', box(1.70, 0.05, 0.09), trs(0, 1.18, -1.85), ALLOY);
+    put('metal', box(0.16, 0.09, 0.13), trs(0, 1.24, -1.85), DARK);
+
+    // ---- binnacle compass, right where the helmsman looks ----
+    put('matte', cyl(0.10, 0.13, 0.34, 10), trs(0, 1.30, -3.05), DARK);
+    put('gloss', new THREE.SphereGeometry(0.115, 12, 9), trs(0, 1.50, -3.05), 0xdedbd2);
+
+    // ---- keel: a fin with a lead bulb, and a spade rudder stock ----
+    put('matte', box(0.20, 1.42, 1.85), trs(0, -1.02, -0.15), DARK);
+    put('matte', new THREE.CapsuleGeometry(0.17, 1.55, 4, 10), trs(0, -1.74, -0.15, Math.PI / 2, 0, 0), 0x2c2f35);
+    put('matte', cyl(0.055, 0.055, 0.55, 8), trs(0, 0.55, -3.55), DARK);
+
+    // ---- mast, spreaders, gooseneck ----
+    this.mastBase = new THREE.Vector3(0, 1.62, 1.05);
+    this.mastHeight = 12.8;
+    // three sections so the taper is visible aloft
+    put('metal', cyl(0.125, 0.145, 6.4, 12), trs(0, this.mastBase.y + 3.2, this.mastBase.z), ALLOY);
+    put('metal', cyl(0.100, 0.125, 4.2, 12), trs(0, this.mastBase.y + 8.5, this.mastBase.z), ALLOY);
+    put('metal', cyl(0.075, 0.100, 2.2, 10), trs(0, this.mastBase.y + 11.7, this.mastBase.z), ALLOY);
+    put('metal', box(0.05, 0.05, 0.11), trs(0, this.mastBase.y + 6.5, this.mastBase.z - 0.10), DARK); // sail track
+    put('gloss', cyl(0.20, 0.24, 0.14, 12), trs(0, this.mastBase.y - 0.04, this.mastBase.z), GRP);    // collar
+    // spreaders sweep aft, as they do on a swept-rig sloop
+    for (const s of [1, -1]) {
+      put('metal', box(1.30, 0.05, 0.08),
+        trs(s * 0.66, this.mastBase.y + 7.3, this.mastBase.z - 0.16, 0, s * 0.22, s * 0.05), ALLOY);
+    }
+    // boom vang from the mast foot to under the boom
+    put('metal', cyl(0.045, 0.055, 0.86, 8), trs(0, 2.42, 0.62, 0.62, 0, 0), ALLOY);
+
+    // ---- pulpit, pushpit, stanchions ----
+    const bowZ = LOA / 2 - 0.30, bowY = sheerAt(0.97) + 0.09;
+    put('metal', tube([
+      [0.50, bowY, bowZ - 0.55], [0.46, bowY + 0.62, bowZ - 0.30],
+      [0.20, bowY + 0.66, bowZ + 0.28], [-0.20, bowY + 0.66, bowZ + 0.28],
+      [-0.46, bowY + 0.62, bowZ - 0.30], [-0.50, bowY, bowZ - 0.55],
+    ]), null, STEEL);
+    const stY = sheerAt(0.02) + 0.09, stZ = -LOA / 2 + 0.34;
+    put('metal', tube([
+      [1.02, stY, stZ + 0.50], [1.00, stY + 0.60, stZ + 0.26],
+      [0.72, stY + 0.62, stZ - 0.02], [-0.72, stY + 0.62, stZ - 0.02],
+      [-1.00, stY + 0.60, stZ + 0.26], [-1.02, stY, stZ + 0.50],
+    ]), null, STEEL);
+    for (let i = 0; i < 4; i++) {
+      const zz = -2.40 + i * 1.85;
+      const st = clamp(zz / LOA + 0.5, 0, 1);
+      const bx = beamAt(st) * (1 + flareAt(st)) - 0.09;
+      const sy = sheerAt(st);
       for (const s of [1, -1]) {
-        if (i % 3 === 0) add(new THREE.CylinderGeometry(0.022, 0.022, 0.62, 6), alloy, bx * s, sy + 0.31, zz);
-        lifeline.push(new THREE.Vector3(bx * s, sy + 0.6, zz));
+        put('metal', cyl(0.020, 0.024, 0.64, 6), trs(bx * s, sy + 0.32, zz), STEEL);
+        put('metal', box(0.10, 0.03, 0.10), trs(bx * s, sy + 0.02, zz), STEEL);
       }
     }
-    const llGeo = new THREE.BufferGeometry();
-    const llPts = [];
-    for (let s = 0; s < 2; s++) {
-      for (let i = 0; i < 12; i++) {
-        llPts.push(lifeline[i * 2 + s], lifeline[(i + 1) * 2 + s]);
-      }
-    }
-    llGeo.setFromPoints(llPts);
-    this.root.add(new THREE.LineSegments(llGeo, new THREE.LineBasicMaterial({ color: 0xd8d8d4 })));
+    // anchor roller on the stemhead
+    put('metal', box(0.14, 0.10, 0.46), trs(0, sheerAt(0.995) + 0.02, LOA / 2 - 0.02), ALLOY);
+    // chainplates
+    for (const s of [1, -1]) put('metal', box(0.03, 0.16, 0.10), trs(s * 1.24, sheerAt(0.55) + 0.05, 0.90), STEEL);
 
-    // standing rigging
-    this.forestayTop = new THREE.Vector3(0, this.mastBase.y + this.mastHeight * 0.88, this.mastBase.z);
-    this.bowPoint = new THREE.Vector3(0, sheerAt(0.985) + 0.1, LOA / 2 - 0.12);
+    for (const [bucket, mat] of [['gloss', gloss], ['matte', matte], ['metal', metal]]) {
+      const mesh = new THREE.Mesh(mergeGeometries(parts[bucket]), mat);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      this.root.add(mesh);
+    }
+
+    // ---- moving parts, which have to stay separate ----
+    this.boomPivot = new THREE.Group();
+    this.boomPivot.position.set(this.mastBase.x, this.mastBase.y + 1.42, this.mastBase.z);
+    this.root.add(this.boomPivot);
+    this.boomLength = 4.05;
+    const boomParts = [
+      prepare(cyl(0.075, 0.088, this.boomLength, 10), trs(0, -this.boomLength / 2, 0, 0, 0, 0), ALLOY),
+      prepare(box(0.10, 0.10, 0.14), trs(0, -0.10, 0), DARK),
+      prepare(cyl(0.05, 0.05, 0.16, 8), trs(0, -this.boomLength + 0.12, 0), DARK),
+    ];
+    const boom = new THREE.Mesh(mergeGeometries(boomParts), metal);
+    boom.rotation.x = Math.PI / 2;   // lie the boom along -Z
+    boom.castShadow = true;
+    this.boomPivot.add(boom);
+
+    this.tiller = new THREE.Group();
+    this.tiller.position.set(0, 1.02, -3.52);
+    this.root.add(this.tiller);
+    const tillerMesh = new THREE.Mesh(
+      prepare(cyl(0.040, 0.052, 1.55, 8), trs(0, 0.13, 0.78, Math.PI / 2 - 0.13, 0, 0), TEAK), matte);
+    tillerMesh.castShadow = true;
+    this.tiller.add(tillerMesh);
+
+    // a spade rudder with a foil section rather than a plank
+    const rudderGeo = prepare(new THREE.BoxGeometry(0.10, 1.25, 0.66, 1, 2, 3), null, DARK);
+    taperFoil(rudderGeo);
+    this.rudderMesh = new THREE.Mesh(rudderGeo, matte);
+    this.rudderMesh.position.set(0, -0.66, -3.55);
+    this.rudderMesh.castShadow = true;
+    this.root.add(this.rudderMesh);
+
+    // ---- standing rigging ----
+    this.forestayTop = new THREE.Vector3(0, this.mastBase.y + this.mastHeight * 0.90, this.mastBase.z);
+    this.bowPoint = new THREE.Vector3(0, sheerAt(0.985) + 0.12, LOA / 2 - 0.10);
+    const mastTop = new THREE.Vector3(0, this.mastBase.y + this.mastHeight - 0.10, this.mastBase.z);
+    const spreader = (s) => new THREE.Vector3(s * 1.32, this.mastBase.y + 7.3, this.mastBase.z - 0.30);
     const rig = [
       this.forestayTop.clone(), this.bowPoint.clone(),
-      new THREE.Vector3(0, this.mastBase.y + this.mastHeight - 0.1, this.mastBase.z), new THREE.Vector3(0, sheerAt(0.02) + 0.1, -LOA / 2 + 0.15),
-      new THREE.Vector3(1.3, this.mastBase.y + 7.2, this.mastBase.z), new THREE.Vector3(1.28, sheerAt(0.55), 0.9),
-      new THREE.Vector3(-1.3, this.mastBase.y + 7.2, this.mastBase.z), new THREE.Vector3(-1.28, sheerAt(0.55), 0.9),
-      new THREE.Vector3(1.3, this.mastBase.y + 7.2, this.mastBase.z), new THREE.Vector3(0, this.mastBase.y + this.mastHeight - 0.4, this.mastBase.z),
-      new THREE.Vector3(-1.3, this.mastBase.y + 7.2, this.mastBase.z), new THREE.Vector3(0, this.mastBase.y + this.mastHeight - 0.4, this.mastBase.z),
+      mastTop.clone(), new THREE.Vector3(0, sheerAt(0.02) + 0.12, -LOA / 2 + 0.20),   // backstay
+      spreader(1), new THREE.Vector3(1.24, sheerAt(0.55), 0.90),                      // cap shroud, lower
+      spreader(-1), new THREE.Vector3(-1.24, sheerAt(0.55), 0.90),
+      spreader(1), mastTop.clone(),                                                   // cap shroud, upper
+      spreader(-1), mastTop.clone(),
+      new THREE.Vector3(0.62, this.mastBase.y + 4.0, this.mastBase.z), new THREE.Vector3(1.24, sheerAt(0.55), 0.90),
+      new THREE.Vector3(-0.62, this.mastBase.y + 4.0, this.mastBase.z), new THREE.Vector3(-1.24, sheerAt(0.55), 0.90),
     ];
-    const rigGeo = new THREE.BufferGeometry().setFromPoints(rig);
-    this.root.add(new THREE.LineSegments(rigGeo, new THREE.LineBasicMaterial({ color: 0xc9ccd0 })));
+    this.root.add(new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(rig),
+      new THREE.LineBasicMaterial({ color: 0xc9ccd0 })));
+
+    // lifelines, threaded through the stanchion tops
+    const llPts = [];
+    for (const s of [1, -1]) {
+      for (const h of [0.62, 0.34]) {
+        let prev = null;
+        for (let i = 0; i <= 5; i++) {
+          const zz = -3.20 + (i / 5) * 6.9;
+          const st = clamp(zz / LOA + 0.5, 0, 1);
+          const bx = beamAt(st) * (1 + flareAt(st)) - 0.09;
+          const p = new THREE.Vector3(bx * s, sheerAt(st) + h, zz);
+          if (prev) llPts.push(prev, p);
+          prev = p;
+        }
+      }
+    }
+    this.root.add(new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(llPts),
+      new THREE.LineBasicMaterial({ color: 0xd8d8d4 })));
 
     // running rigging that actually moves
-    this.sheetGeo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(),
-      new THREE.Vector3(), new THREE.Vector3(),
-    ]);
+    this.sheetGeo = new THREE.BufferGeometry().setFromPoints(
+      Array.from({ length: 8 }, () => new THREE.Vector3()));
     const sheets = new THREE.LineSegments(this.sheetGeo, new THREE.LineBasicMaterial({ color: 0xe0ddd2 }));
     sheets.frustumCulled = false;
     this.root.add(sheets);
 
-    // sails
-    this.mainGeo = sailGeometry(9, 12);
-    this.main = new THREE.Mesh(this.mainGeo, this.sailMat);
+    // ---- sails ----
+    // Sailcloth is bright but not blown out, so the camber still reads as
+    // shape. The small emissive stands in for transmission: real cloth passes
+    // light, so the windward face is never as dark as an opaque surface.
+    const cloth = (withNumber) => applyAtmosphere(new THREE.MeshStandardMaterial({
+      map: makeSailTexture(L, withNumber),
+      color: 0xffffff, roughness: 0.88, metalness: 0.0, side: THREE.DoubleSide,
+      envMapIntensity: 0.5, emissive: 0xdfe4e8, emissiveIntensity: 0.11,
+    }));
+    this.mainMat = cloth(true);
+    this.jibMat = cloth(false);
+
+    this.mainGeo = sailGeometry(12, 16);
+    this.main = new THREE.Mesh(this.mainGeo, this.mainMat);
     this.main.castShadow = true;
     this.main.frustumCulled = false;
     this.root.add(this.main);
-    this.jibGeo = sailGeometry(8, 10);
-    this.jib = new THREE.Mesh(this.jibGeo, this.sailMat);
+
+    this.jibGeo = sailGeometry(10, 13);
+    this.jib = new THREE.Mesh(this.jibGeo, this.jibMat);
     this.jib.castShadow = true;
     this.jib.frustumCulled = false;
     this.root.add(this.jib);
@@ -2954,25 +3311,36 @@ class Boat {
     bg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9), 3));
     this.burgeeGeo = bg;
     this.burgee = new THREE.Mesh(bg, applyAtmosphere(new THREE.MeshStandardMaterial({
-      color: 0xd94a3d, roughness: 0.9, side: THREE.DoubleSide,
+      color: L.burgee, roughness: 0.9, side: THREE.DoubleSide,
     })));
     this.burgee.frustumCulled = false;
     this.root.add(this.burgee);
 
     // where the helmsman's eyes are
     this.helm = new THREE.Group();
-    this.helm.position.set(0.50, 2.28, -3.45);
+    this.helm.position.set(0.50, 2.30, -3.42);
     this.root.add(this.helm);
   }
 
-  /** Compass bearing the boat is pointing, in radians. */
+  /** Give the textures the anisotropy the renderer can actually do. */
+  setAnisotropy(n) {
+    for (const m of [this.mainMat, this.jibMat]) {
+      if (m.map) { m.map.anisotropy = n; m.map.needsUpdate = true; }
+    }
+  }
+
   get forward() { return _fwd.set(Math.sin(this.heading), 0, Math.cos(this.heading)); }
   get starboard() { return _stb.set(Math.cos(this.heading), 0, -Math.sin(this.heading)); }
   get speed() { return Math.hypot(this.surge, this.sway); }
 
+  /**
+   * One physics substep. Only state that has to be integrated lives here —
+   * everything visual moved to updateVisual(), which runs once a frame no
+   * matter how many substeps the frame needed.
+   */
   update(dt, input, wind, time) {
-    const fwd = this.forward.clone();
-    const stb = this.starboard.clone();
+    const fwd = _u1.copy(this.forward);
+    const stb = _u2.copy(this.starboard);
 
     // ---- apparent wind ----------------------------------------------------
     const windVec = _w1.set(-Math.sin(wind.from), 0, -Math.cos(wind.from)).multiplyScalar(wind.speed);
@@ -2989,7 +3357,6 @@ class Boat {
     // ---- sail trim --------------------------------------------------------
     const absBeta = Math.abs(beta);
     const MAX_BOOM = 1.45;
-    // the trim that keeps the sail at its best angle of attack for this breeze
     const targetTrim = clamp((absBeta - 0.34) / MAX_BOOM, 0, 1);
     if (this.autoTrim) {
       this.mainTrim = damp(this.mainTrim, targetTrim, 2.2, dt);
@@ -2997,34 +3364,31 @@ class Boat {
       this.mainTrim = clamp(this.mainTrim + input.trim * dt * 0.55, 0, 1);
     }
     const boomAngle = this.mainTrim * MAX_BOOM;   // 0 = sheeted on the centreline
-    const tackSign = beta >= 0 ? 1 : -1;                     // +1 = wind from starboard
-    const alpha = absBeta - boomAngle;                       // angle of attack
+    const tackSign = beta >= 0 ? 1 : -1;          // +1 = wind from starboard
+    const alpha = absBeta - boomAngle;            // angle of attack
 
     // ---- sail force -------------------------------------------------------
     const a = clamp(alpha, -0.3, Math.PI / 2);
     let CL = 1.75 * Math.sin(2 * Math.max(a, 0));
     let CD = 0.10 + 1.30 * (1 - Math.cos(2 * Math.max(a, 0))) * 0.5;
-    // a sail that is eased past the wind just flogs
     const luff = clamp((0.09 - a) / 0.20, 0, 1);
     this.luffing = luff;
     CL *= 1 - luff;
     CD *= 1 - luff * 0.55;
-    // stall past about 35 degrees of attack, but never below the drag floor
     if (a > 0.62) CL *= Math.max(0.35, 1 - (a - 0.62) * 1.15);
 
     const heelFactor = Math.cos(this.heel);
-    const q = 0.5 * RHO_AIR * awSpeed * awSpeed * SAIL_AREA * heelFactor;
+    const q = 0.5 * RHO_AIR * awSpeed * awSpeed * SAIL_AREA * heelFactor * this.efficiency;
     const lift = q * CL;
     const drag = q * CD;
 
-    // drag acts along the apparent wind, lift across it on the leeward side
     const inv = awSpeed > 1e-3 ? 1 / awSpeed : 0;
     const wF = awF * inv, wS = awS * inv;
     let lF = -wS, lS = wF;
     if (beta < 0) { lF = -lF; lS = -lS; }
 
-    let forceF = lift * lF + drag * wF;
-    let forceS = lift * lS + drag * wS;
+    const forceF = lift * lF + drag * wF;
+    const forceS = lift * lS + drag * wS;
 
     // ---- hull resistance --------------------------------------------------
     const u = this.surge;
@@ -3033,7 +3397,6 @@ class Boat {
     if (over > 0.80) resist += Math.sign(u) * 9000 * Math.pow(over - 0.80, 2.2);
     const swayResist = 0.5 * RHO_WATER * 6.4 * 1.25 * this.sway * Math.abs(this.sway);
 
-    // ---- integrate surge and sway -----------------------------------------
     const groundDrag = this.aground > 0 ? 9000 : 0;
     this.surge += ((forceF - resist - Math.sign(u) * groundDrag) / MASS) * dt;
     this.sway += ((forceS - swayResist) / MASS) * dt;
@@ -3042,8 +3405,7 @@ class Boat {
     this.driveForce = forceF;
 
     // ---- steering ----------------------------------------------------------
-    const rudderTarget = clamp(input.rudder, -1, 1);
-    this.rudder = damp(this.rudder, rudderTarget, 7, dt);
+    this.rudder = damp(this.rudder, clamp(input.rudder, -1, 1), 7, dt);
     const flow = Math.abs(u) + 0.4;
     const rudderLift = 0.5 * RHO_WATER * 0.42 * 4.6 * Math.sin(this.rudder * 0.62) * flow * flow;
     let yawMoment = rudderLift * 3.6 * Math.sign(u || 1);
@@ -3054,11 +3416,8 @@ class Boat {
     this.heading += this.yawRate * dt;
 
     // ---- heel ---------------------------------------------------------------
-    const heelMoment = forceS * CE_HEIGHT;
-    const righting = MASS * G * GM;
-    const targetHeel = clamp(Math.atan2(heelMoment, righting), -0.75, 0.75);
-    const k = 5.5, c = 2.6;
-    this.heelRate += (k * (targetHeel - this.heel) - c * this.heelRate) * dt;
+    const targetHeel = clamp(Math.atan2(forceS * CE_HEIGHT, MASS * G * GM), -0.75, 0.75);
+    this.heelRate += (5.5 * (targetHeel - this.heel) - 2.6 * this.heelRate) * dt;
     this.heel += this.heelRate * dt;
 
     // ---- move ---------------------------------------------------------------
@@ -3069,7 +3428,6 @@ class Boat {
     const bed = terrainHeight(this.position.x, this.position.z);
     if (bed > -1.5) {
       this.aground = 1;
-      // shove her back off the shelf
       const gx = terrainHeight(this.position.x + 2, this.position.z) - bed;
       const gz = terrainHeight(this.position.x, this.position.z + 2) - bed;
       this.position.x -= gx * dt * 14;
@@ -3079,7 +3437,21 @@ class Boat {
       this.aground = Math.max(0, this.aground - dt);
     }
 
-    // ---- ride the waves ----------------------------------------------------
+    this._rig.boomAngle = boomAngle;
+    this._rig.tackSign = tackSign;
+    this._rig.beta = beta;
+    return this._rig;
+  }
+
+  /**
+   * Everything the eye sees: buoyancy, pose, sails, lines. Once a frame, not
+   * once a substep — rebuilding two sails ten times for one drawn image is
+   * work nobody ever looks at.
+   */
+  updateVisual(dt, time) {
+    const fwd = _u1.copy(this.forward);
+    const stb = _u2.copy(this.starboard);
+
     const s0 = sampleOcean(this.position.x, this.position.z, time, _s0);
     const bowP = _w1.copy(fwd).multiplyScalar(LOA * 0.42);
     const s1 = sampleOcean(this.position.x + bowP.x, this.position.z + bowP.z, time, _s1);
@@ -3088,7 +3460,7 @@ class Boat {
     const s3 = sampleOcean(this.position.x + sideP.x, this.position.z + sideP.z, time, _s3);
     const s4 = sampleOcean(this.position.x - sideP.x, this.position.z - sideP.z, time, _s4);
 
-    const ride = (s0.y * 0.4 + (s1.y + s2.y) * 0.2 + (s3.y + s4.y) * 0.1);
+    const ride = s0.y * 0.4 + (s1.y + s2.y) * 0.2 + (s3.y + s4.y) * 0.1;
     const wavePitch = Math.atan2(s1.y - s2.y, LOA * 0.84);
     const waveRoll = Math.atan2(s3.y - s4.y, BEAM);
 
@@ -3096,19 +3468,17 @@ class Boat {
     this.pitch = damp(this.pitch, -wavePitch * 0.85 - clamp(this.surge / 12, 0, 0.1), 6, dt);
     this.waveRoll = damp(this.waveRoll || 0, waveRoll * 0.7, 5, dt);
 
-    // ---- pose ---------------------------------------------------------------
     this.root.position.copy(this.position);
     this.root.rotation.y = this.heading;
     this.root.rotation.x = this.pitch;
     this.root.rotation.z = -(this.heel + this.waveRoll);
 
+    const { boomAngle, tackSign, beta } = this._rig;
     this.updateRig(boomAngle * tackSign, tackSign, beta, time);
-    return { boomAngle, tackSign };
   }
 
   /** boomAngle is signed: negative puts the boom out to port. */
   updateRig(boomAngle, tackSign, beta, time) {
-    // the boom swings aft from the gooseneck
     this.boomPivot.rotation.y = boomAngle;
     const clewLocal = _w1.set(0, 0, -this.boomLength).applyEuler(this.boomPivot.rotation).add(this.boomPivot.position);
 
@@ -3124,20 +3494,23 @@ class Boat {
     const jibAngle = Math.min(Math.abs(boomAngle) * 0.55 + 0.18, 1.15);
     const jClew = _b5.set(
       Math.sin(jibAngle) * 2.9 * sheetSide,
-      1.35,
+      1.38,
       this.bowPoint.z - Math.cos(jibAngle) * 3.5
     );
     updateSail(this.jibGeo, jTack, jHead, jClew, camber * 0.85, 0.05, this.luffing * 0.26, time);
 
-    // sheets
+    // sheets: mainsheet to the traveler, jib sheet to a winch, the vang, and
+    // the forestay's own tail
     const sp = this.sheetGeo.getAttribute('position');
-    const traveler = _b6.set(0, 1.18, -1.85);
     sp.setXYZ(0, clewLocal.x, clewLocal.y, clewLocal.z);
-    sp.setXYZ(1, traveler.x, traveler.y, traveler.z);
+    sp.setXYZ(1, 0, 1.24, -1.85);
     sp.setXYZ(2, jClew.x, jClew.y, jClew.z);
-    sp.setXYZ(3, 1.0 * sheetSide, 1.2, -1.2);
+    sp.setXYZ(3, 0.86 * sheetSide, 1.32, -1.55);
     sp.setXYZ(4, this.bowPoint.x, this.bowPoint.y, this.bowPoint.z);
     sp.setXYZ(5, jTack.x, jTack.y + 0.02, jTack.z);
+    // the boom's own topping lift, slack and drooping
+    sp.setXYZ(6, clewLocal.x, clewLocal.y, clewLocal.z);
+    sp.setXYZ(7, this.mastBase.x, this.mastBase.y + this.mastHeight - 0.5, this.mastBase.z);
     sp.needsUpdate = true;
 
     // burgee streams with the apparent wind
@@ -3156,8 +3529,43 @@ class Boat {
   }
 }
 
+// ---------------------------------------------------------------------------
+
+/** Keep a geometry's own vertex colours while making it merge-compatible. */
+function bakeVertexColored(geometry, matrix) {
+  const g = geometry.index ? geometry.toNonIndexed() : geometry.clone();
+  if (matrix) g.applyMatrix4(matrix);
+  if (!g.getAttribute('uv')) {
+    g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(g.getAttribute('position').count * 2), 2));
+  }
+  g.deleteAttribute('tangent');
+  return g;
+}
+
+/** Squeeze a box into a rough foil: thickest a third back, fine at the trailing edge. */
+function taperFoil(geo) {
+  const p = geo.getAttribute('position');
+  let minZ = Infinity, maxZ = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (let i = 0; i < p.count; i++) {
+    minZ = Math.min(minZ, p.getZ(i)); maxZ = Math.max(maxZ, p.getZ(i));
+    minY = Math.min(minY, p.getY(i)); maxY = Math.max(maxY, p.getY(i));
+  }
+  const spanZ = maxZ - minZ || 1;
+  const spanY = maxY - minY || 1;
+  for (let i = 0; i < p.count; i++) {
+    const c = (p.getZ(i) - minZ) / spanZ;         // 0 = trailing edge, 1 = leading
+    p.setX(i, p.getX(i) * (0.16 + 0.84 * Math.sin(Math.PI * Math.pow(c, 0.55))));
+    // rake: the tip trails the root, which is what a spade rudder looks like
+    p.setZ(i, p.getZ(i) - 0.16 * (1 - (p.getY(i) - minY) / spanY));
+  }
+  p.needsUpdate = true;
+  geo.computeVertexNormals();
+}
+
 const _fwd = new THREE.Vector3();
 const _stb = new THREE.Vector3();
+const _u1 = new THREE.Vector3();
+const _u2 = new THREE.Vector3();
 const _w1 = new THREE.Vector3();
 const _w2 = new THREE.Vector3();
 const _w3 = new THREE.Vector3();
@@ -3166,11 +3574,211 @@ const _b2 = new THREE.Vector3();
 const _b3 = new THREE.Vector3();
 const _b4 = new THREE.Vector3();
 const _b5 = new THREE.Vector3();
-const _b6 = new THREE.Vector3();
 const mk = () => ({ y: 0, normal: new THREE.Vector3(), fold: 1 });
 const _s0 = mk(), _s1 = mk(), _s2 = mk(), _s3 = mk(), _s4 = mk();
 
-return {Boat};
+return {LOA,BEAM,LIVERIES,Boat};
+})();
+
+const __m_skipper = (function () {
+const {clamp,angleDelta} = __m_utils;
+const {waterDepthAt} = __m_waves;
+
+/**
+ * An autonomous helmsman.
+ *
+ * The interesting part of sailing a course is that you cannot steer at the
+ * mark. Anything inside about 43 degrees of the true wind is unsailable, and
+ * running dead downwind is slower than tacking downwind, so a skipper is
+ * always solving the same problem: of the courses I *can* sail, which one
+ * closes the mark fastest?
+ *
+ * So that is what this does. Every fifth of a second it sweeps a fan of
+ * candidate headings and scores each one by velocity made good — boatspeed
+ * from a rough polar, projected onto the bearing to the mark — then subtracts
+ * two penalties: for sailing out of the corridor either side of the rhumb
+ * line, and for the depth of water it would be sailing into. Beating and
+ * gybing angles fall out of the polar rather than being hardcoded, the
+ * corridor turns a beat into a converging zig-zag, and the depth term is what
+ * keeps her off a lee shore that a bearing-follower would drive straight onto.
+ *
+ * It drives a Boat through the same {rudder, trim} interface the keyboard
+ * uses, so the rival is sailing under exactly the physics the player is.
+ */
+
+const TACK_COOLDOWN = 9.0;   // seconds; a tack costs boatspeed, so do not spam them
+const MARK_RADIUS = 24;
+const REPLAN = 0.2;          // seconds between course decisions
+const SWEEP = 16;            // candidate headings either side of the bearing
+const SWEEP_STEP = 0.145;    // radians
+
+/**
+ * Fraction of best boatspeed against angle off the true wind. Close-hauled is
+ * slow but points; a beam reach is quick; dead downwind is slow again, which
+ * is the whole reason boats tack downwind.
+ */
+const POLAR_A = [0.75, 1.05, 1.31, 1.57, 1.92, 2.27, 2.62, 2.88, Math.PI];
+const POLAR_V = [0.70, 0.86, 0.95, 1.00, 1.00, 0.94, 0.84, 0.74, 0.66];
+function polar(a) {
+  if (a < POLAR_A[0]) return 0;          // in the no-go zone: no speed at all
+  for (let i = 1; i < POLAR_A.length; i++) {
+    if (a <= POLAR_A[i]) {
+      const t = (a - POLAR_A[i - 1]) / (POLAR_A[i] - POLAR_A[i - 1]);
+      return POLAR_V[i - 1] + (POLAR_V[i] - POLAR_V[i - 1]) * t;
+    }
+  }
+  return POLAR_V[POLAR_V.length - 1];
+}
+
+/** Depth probes along a candidate course: near ones matter most. */
+const PROBES = [[26, 1.0], [60, 0.8], [110, 0.55], [190, 0.35]];
+const SAFE_DEPTH = 13;
+
+class Skipper {
+  constructor(boat, marks, opts = {}) {
+    this.boat = boat;
+    this.marks = marks;
+    this.mark = 0;
+    this.finished = false;
+    this.finishTime = null;
+    this.tack = opts.tack ?? -1;
+    this.sinceTack = TACK_COOLDOWN;
+    this.course = boat.heading;
+    this.sincePlan = REPLAN;
+    this.control = { rudder: 0, trim: 0 };
+    boat.autoTrim = true;
+  }
+
+  /** How far she still has to sail, following the marks — the racing gap metric. */
+  remaining() {
+    if (this.finished) return 0;
+    const b = this.boat;
+    let d = Math.hypot(this.marks[this.mark].pos.x - b.position.x,
+                       this.marks[this.mark].pos.y - b.position.z);
+    for (let i = this.mark; i < this.marks.length - 1; i++) {
+      d += this.marks[i].pos.distanceTo(this.marks[i + 1].pos);
+    }
+    return d;
+  }
+
+  update(dt, wind, time, other) {
+    const b = this.boat;
+    this.sinceTack += dt;
+    this.sincePlan += dt;
+
+    if (!this.finished) {
+      const m = this.marks[this.mark];
+      if (Math.hypot(m.pos.x - b.position.x, m.pos.y - b.position.z) < MARK_RADIUS) {
+        this.mark++;
+        if (this.mark >= this.marks.length) {
+          this.mark = this.marks.length - 1;
+          this.finished = true;
+          this.finishTime = time;
+        }
+      }
+    }
+
+    if (this.sincePlan >= REPLAN) {
+      this.sincePlan = 0;
+      this.course = this.plan(wind);
+    }
+
+    // ---- helm --------------------------------------------------------------
+    let rudder = angleDelta(b.heading, this.course) * 1.9 - b.yawRate * 2.6;
+    // caught head to wind with no steerage: hold the helm over on the tack she
+    // was last on until the bow falls off and the sails fill again
+    if (b.luffing > 0.6 && Math.abs(b.surge) < 0.55) rudder = this.tack;
+    rudder += this.avoidBoat(b, other);
+    this.control.rudder = clamp(rudder, -1, 1);
+    this.control.trim = 0;
+    return this.control;
+  }
+
+  /** Pick the best sailable heading. */
+  plan(wind) {
+    const b = this.boat;
+    const wf = wind.from;
+    // race over: round up head to wind and sit there
+    if (this.finished) return wf;
+
+    const m = this.marks[this.mark];
+    const ex = m.pos.x - b.position.x;
+    const ez = m.pos.y - b.position.z;
+    const dist = Math.hypot(ex, ez);
+    const bearing = Math.atan2(ex, ez);
+
+    // Cross-track on the axis square to the wind, with the mark at the origin.
+    // The corridor narrows as the mark approaches, so a beat converges on the
+    // layline instead of running off to the edge of the bay.
+    const cross = -(ex * Math.cos(wf) + ez * -Math.sin(wf));
+    const corridor = clamp(dist * 0.40, 22, 160);
+    const over = Math.max(0, Math.abs(cross) - corridor) / Math.max(corridor, 1);
+    const crossSign = Math.sign(cross) || 1;
+
+    const stuck = b.aground > 0;
+    const allowSwitch = this.sinceTack > TACK_COOLDOWN || stuck;
+    // Never look for shoals beyond the mark she is trying to reach, and stop
+    // caring about them entirely over the last thirty metres. Without both,
+    // a mark laid anywhere near a shelf is one she circles forever, because
+    // the water behind it always scores worse than turning away.
+    const look = Math.max(PROBES[0][0], dist - 12);
+    const commit = clamp((dist - 30) / 60, 0, 1);
+
+    let best = this.course, bestScore = -Infinity, bestSide = this.tack;
+    for (let k = -SWEEP; k <= SWEEP; k++) {
+      const h = bearing + k * SWEEP_STEP;
+      const rel = angleDelta(wf, h);
+      const v = polar(Math.abs(rel));
+      if (v <= 0) continue;                       // she cannot sail this angle
+
+      const side = rel >= 0 ? 1 : -1;
+      if (!allowSwitch && side !== this.tack) continue;
+
+      let score;
+      if (stuck) {
+        // aground: getting off the shelf is the only objective that matters
+        score = -this.risk(b, h, 1e9) * 3.0 + v * 0.2;
+      } else {
+        score = v * Math.cos(angleDelta(h, bearing)) - this.risk(b, h, look) * 1.5 * commit;
+        if (side === this.tack) score += 0.08;    // hysteresis, so she settles
+        if (over > 0) {
+          const drift = Math.sin(rel);            // rate the cross-track grows
+          score -= Math.min(over, 3) * Math.max(0, drift * crossSign) * 1.2;
+        }
+      }
+      if (score > bestScore) { bestScore = score; best = h; bestSide = side; }
+    }
+
+    if (bestSide !== this.tack) { this.tack = bestSide; this.sinceTack = 0; }
+    return best;
+  }
+
+  /** How much shallow water a course would sail into, 0 (clear) upward. */
+  risk(b, h, look) {
+    const s = Math.sin(h), c = Math.cos(h);
+    let r = 0;
+    for (const [d, w] of PROBES) {
+      if (d > look) break;
+      const depth = waterDepthAt(b.position.x + s * d, b.position.z + c * d);
+      if (depth < SAFE_DEPTH) r += w * (1 - depth / SAFE_DEPTH);
+    }
+    return r;
+  }
+
+  /** Basic good manners: do not sail through the other boat. */
+  avoidBoat(b, other) {
+    if (!other) return 0;
+    const dx = other.position.x - b.position.x;
+    const dz = other.position.z - b.position.z;
+    const d = Math.hypot(dx, dz);
+    if (d > 30 || d < 1e-3) return 0;
+    const rel = angleDelta(b.heading, Math.atan2(dx, dz));
+    if (Math.abs(rel) > 1.2) return 0;            // already past, or astern
+    return -Math.sign(rel || 1) * (1 - d / 30) * 0.85;
+  }
+}
+
+return {Skipper};
 })();
 
 const __m_post = (function () {
@@ -3429,6 +4037,7 @@ class Hud {
       status: document.getElementById('status'),
       mark: document.getElementById('mark'),
       timer: document.getElementById('timer'),
+      rivalGap: document.getElementById('rival-gap'),
       help: document.getElementById('help'),
       toast: document.getElementById('toast'),
       fps: document.getElementById('fps'),
@@ -3455,6 +4064,25 @@ class Hud {
     this.el.toast.textContent = text;
     this.el.toast.classList.add('show');
     this._toastUntil = performance.now() / 1000 + seconds;
+  }
+
+  /**
+   * The gap to the rival, measured in distance still to sail rather than in
+   * separation — two boats on opposite tacks can be 300 m apart and dead level.
+   */
+  updateRival(playerLeft, rivalLeft, playerDone, rivalDone) {
+    const el = this.el.rivalGap;
+    if (!el) return;
+    if (playerDone || rivalDone) {
+      el.textContent = playerDone && !rivalDone ? 'WON' : !playerDone && rivalDone ? 'LOST' : 'FINISHED';
+      el.className = playerDone && !rivalDone ? 'ahead' : 'astern';
+      return;
+    }
+    const gap = rivalLeft - playerLeft;          // positive: the player is ahead
+    const m = Math.abs(gap);
+    const dist = m > 950 ? `${(m / 1000).toFixed(1)} km` : `${m.toFixed(0)} m`;
+    el.textContent = m < 12 ? 'LEVEL' : `${gap > 0 ? '+' : '−'}${dist}`;
+    el.className = m < 12 ? '' : gap > 0 ? 'ahead' : 'astern';
   }
 
   update(state) {
@@ -3712,7 +4340,8 @@ const {PROP_LAYER} = __m_layers;
 const {buildTown,makeBirds} = __m_town;
 const {Ocean} = __m_ocean;
 const {Wake} = __m_wake;
-const {Boat} = __m_boat;
+const {Boat,LIVERIES} = __m_boat;
+const {Skipper} = __m_skipper;
 const {Post} = __m_post;
 const {Hud} = __m_hud;
 const {Input} = __m_input;
@@ -3742,6 +4371,10 @@ const camera = new THREE.PerspectiveCamera(57, 2, 0.15, 30000);
 const state = {
   time: 0,
   chase: false,
+  // where the chase camera sits, in boat-relative polar coordinates
+  chaseAngle: 2.6,
+  chaseDist: 15,
+  chaseHeight: 6.2,
   quality: 1,
   sunAzimuth: 1.95,
   sunElevation: 0.42,
@@ -3755,6 +4388,7 @@ const state = {
 };
 
 let sky, terrain, ocean, wake, boat, post, hud, input, town, birds;
+let rival, rivalWake, skipper;
 
 const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
 async function step(pct, label, fn) {
@@ -3773,6 +4407,14 @@ async function boot() {
   const waterNormal = await step(24, 'Carving ripples…', () => makeWaterNormalTexture(512, 11));
   const foamTex = await step(38, 'Whipping up foam…', () => makeFoamTexture(512, 91));
   const sandTex = await step(46, 'Sifting sand…', () => makeSandTexture(512, 61));
+
+  // Every one of these is read at a grazing angle across a receding surface,
+  // which is exactly the case trilinear filtering blurs into mush.
+  const aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  for (const tex of [waterNormal, foamTex, sandTex]) {
+    tex.anisotropy = aniso;
+    tex.needsUpdate = true;
+  }
 
   await step(54, 'Lighting the sky…', () => {
     sky = new Sky(renderer, noiseTex);
@@ -3795,11 +4437,20 @@ async function boot() {
     ocean = new Ocean(renderer, { waterNormal, foam: foamTex, noise: noiseTex, terrain });
     scene.add(ocean.mesh);
     wake = new Wake(renderer, { size: 512, region: 320 });
+    rivalWake = new Wake(renderer, { size: 256, region: 260 });
   });
 
   await step(96, 'Rigging the boat…', () => {
-    boat = new Boat(scene);
+    boat = new Boat(scene, { livery: LIVERIES.player, name: 'Leeward' });
+    // The rival starts to leeward on the line, which is the honest place for
+    // a boat you are supposed to be able to beat.
+    rival = new Boat(scene, {
+      livery: LIVERIES.rival, name: 'Mistral',
+      position: new THREE.Vector3(-26, 0, 292), heading: Math.PI, efficiency: 0.965,
+    });
+    for (const b of [boat, rival]) b.setAnisotropy(aniso);
     buildCourse();
+    skipper = new Skipper(rival, state.marks, { tack: -1 });
     post = new Post(renderer);
     hud = new Hud();
     input = new Input(canvas);
@@ -3851,7 +4502,9 @@ function buildCourse() {
   const darkMat = applyAtmosphere(new THREE.MeshStandardMaterial({ color: 0x1b1d22, roughness: 0.7 }));
 
   raw.forEach(([x, z], i) => {
-    const p = pushToDeepWater(x, z, 5.5);
+    // 12 m, not the 5.5 a buoy would technically float in: a mark laid on the
+    // edge of the shelf is one no boat can round without touching bottom
+    const p = pushToDeepWater(x, z, 12);
     const g = new THREE.Group();
     const body = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.86, 1.5, 12), buoyMat);
     body.position.y = 0.25;
@@ -3897,6 +4550,20 @@ function updateCourse(dt) {
 
 const fmtTime = (t) => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
 
+/**
+ * Distance still to sail, following the marks. Comparing this between the two
+ * boats is the only honest way to say who is winning: raw separation would
+ * call a boat ahead when she is merely further up the wrong leg.
+ */
+function courseRemaining(markIndex, pos) {
+  if (markIndex >= state.marks.length) return 0;
+  let d = Math.hypot(state.marks[markIndex].pos.x - pos.x, state.marks[markIndex].pos.y - pos.z);
+  for (let i = markIndex; i < state.marks.length - 1; i++) {
+    d += state.marks[i].pos.distanceTo(state.marks[i + 1].pos);
+  }
+  return d;
+}
+
 // ---------------------------------------------------------------------------
 // camera
 // ---------------------------------------------------------------------------
@@ -3916,7 +4583,8 @@ function updateCamera(dt) {
   boat.root.updateMatrixWorld(true);
 
   if (state.chase) {
-    const off = tmp.set(Math.sin(boat.heading + 2.6) * 15, 6.2, Math.cos(boat.heading + 2.6) * 15);
+    const a = boat.heading + state.chaseAngle;
+    const off = tmp.set(Math.sin(a) * state.chaseDist, state.chaseHeight, Math.cos(a) * state.chaseDist);
     chasePos.lerp(off.add(boat.position), 1 - Math.exp(-dt * 2.6));
     chaseAim.lerp(tmp.copy(boat.position).setY(boat.position.y + 3.4), 1 - Math.exp(-dt * 5));
     camera.position.copy(chasePos);
@@ -3945,11 +4613,12 @@ function updateCamera(dt) {
  * tiers turn down first.
  */
 const TIERS = {
-  high:   { name: 'High',   reflScale: 0.55, cloudRefl: 1, msaa: 4, shadow: 2048, shadowEvery: 2, bloom: true,  planar: 1.0, maxScale: 1.00, foam: 1.0 },
-  medium: { name: 'Medium', reflScale: 0.42, cloudRefl: 0, msaa: 2, shadow: 1024, shadowEvery: 3, bloom: true,  planar: 1.0, maxScale: 0.85, foam: 1.0 },
-  low:    { name: 'Fast',   reflScale: 0.00, cloudRefl: 0, msaa: 0, shadow: 1024, shadowEvery: 5, bloom: false, planar: 0.0, maxScale: 0.70, foam: 0.9 },
+  ultra:  { name: 'Ultra',  reflScale: 0.85, cloudRefl: 1, msaa: 4, shadow: 4096, shadowEvery: 1, bloom: true,  planar: 1.0, maxScale: 1.00, foam: 1.0, detail: 1.15, micro: 1 },
+  high:   { name: 'High',   reflScale: 0.68, cloudRefl: 1, msaa: 4, shadow: 3072, shadowEvery: 1, bloom: true,  planar: 1.0, maxScale: 1.00, foam: 1.0, detail: 1.00, micro: 1 },
+  medium: { name: 'Medium', reflScale: 0.44, cloudRefl: 0, msaa: 2, shadow: 1024, shadowEvery: 3, bloom: true,  planar: 1.0, maxScale: 0.85, foam: 1.0, detail: 0.90, micro: 0 },
+  low:    { name: 'Fast',   reflScale: 0.00, cloudRefl: 0, msaa: 0, shadow: 1024, shadowEvery: 5, bloom: false, planar: 0.0, maxScale: 0.70, foam: 0.9, detail: 0.75, micro: 0 },
 };
-const TIER_ORDER = ['high', 'medium', 'low'];
+const TIER_ORDER = ['ultra', 'high', 'medium', 'low'];
 
 const perf = {
   tier: 'high',
@@ -3957,7 +4626,7 @@ const perf = {
   basePixelRatio: Math.min(devicePixelRatio || 1, 2),
   frameMs: 16.7,
   adjustTimer: 0,
-  autoTiered: false,
+  demoted: false,      // once the tuner has had to give ground, it stops climbing
   frames: 0,
 };
 
@@ -3978,6 +4647,8 @@ function applyTier(name) {
   ocean.uniforms.uCloudReflections.value = t.cloudRefl;
   ocean.uniforms.uPlanarStrength.value = t.planar;
   ocean.uniforms.uFoamAmount.value = t.foam;
+  ocean.uniforms.uDetailStrength.value = t.detail;
+  ocean.uniforms.uMicroDetail.value = t.micro;
   post.enabled = t.bloom;
   post.setSamples(t.msaa);
   sky.setShadowSize(t.shadow);
@@ -4025,6 +4696,7 @@ function autoTune(dt, rawMs) {
   const FLOOR = 0.5;
 
   if (slow) {
+    perf.demoted = true;
     if (dire && canTier) {
       // far off the pace: shedding features beats shaving pixels
       perf.scale = 1.0;
@@ -4041,6 +4713,12 @@ function autoTune(dt, rawMs) {
   } else if (fast && perf.scale < tier.maxScale) {
     perf.scale = Math.min(tier.maxScale, perf.scale + 0.06);
     resize();
+  } else if (i > 0 && !perf.demoted && perf.frameMs < 9.5 && perf.scale >= tier.maxScale) {
+    // Room to spare and nothing has ever had to be given back — climb. The
+    // demoted latch is what stops this becoming an oscillator on a machine
+    // that sits right on the boundary.
+    applyTier(TIER_ORDER[i - 1]);
+    hud.toast(`Quality: ${TIERS[perf.tier].name}`, 1.8);
   }
 }
 
@@ -4082,11 +4760,19 @@ function hotkeys() {
   if (input.down('Minus')) setWind(-2.5);
   if (input.down('Equal')) setWind(2.5);
   if (input.tapped('KeyR')) {
-    boat.position.set(0, 0, 280);
-    boat.heading = Math.PI; boat.surge = 0; boat.sway = 0; boat.yawRate = 0; boat.heel = 0;
+    restart(boat, 0, 280);
+    restart(rival, -26, 292);
+    skipper.mark = 0; skipper.finished = false; skipper.finishTime = null;
+    skipper.tack = -1; skipper.sinceTack = 99;
     state.currentMark = 0; state.raceStart = null; state.raceTime = 0; state.finished = false;
     hud.toast('Back to the start');
   }
+}
+
+function restart(b, x, z) {
+  b.position.set(x, 0, z);
+  b.heading = Math.PI;
+  b.surge = 0; b.sway = 0; b.yawRate = 0; b.heel = 0; b.heelRate = 0; b.rudder = 0;
 }
 
 let sunTimer = 0;
@@ -4122,6 +4808,8 @@ function loop(now) {
   state.time += dt;
   if (state.paused) {
     // keep the sea alive behind the title card
+    boat.updateVisual(dt, state.time);
+    rival.updateVisual(dt, state.time);
     updateCourse(dt);
     updateCamera(dt);
     birds(state.time);
@@ -4148,12 +4836,22 @@ function loop(now) {
   const steps = Math.min(10, Math.max(1, Math.ceil(dt / 0.020)));
   const sub = dt / steps;
   let rig;
+  const helm = skipper.update(dt, state.wind, t, boat);
   for (let i = 0; i < steps; i++) {
-    rig = boat.update(sub, input, state.wind, t - dt + sub * (i + 1));
+    const st = t - dt + sub * (i + 1);
+    rig = boat.update(sub, input, state.wind, st);
+    rival.update(sub, helm, state.wind, st);
   }
+
+  // Sails, buoyancy and pose are per-frame work: rebuilding them once per
+  // substep is ten times the cost for an image nobody sees.
+  boat.updateVisual(dt, t);
+  rival.updateVisual(dt, t);
 
   heading2.set(Math.sin(boat.heading), Math.cos(boat.heading));
   wake.update(dt, boat.position, heading2, Math.abs(boat.surge), 9.5);
+  heading2.set(Math.sin(rival.heading), Math.cos(rival.heading));
+  rivalWake.update(dt, rival.position, heading2, Math.abs(rival.surge), 9.5);
 
   updateCourse(dt);
   updateCamera(dt);
@@ -4164,6 +4862,8 @@ function loop(now) {
   hud.update({ boat, wind: state.wind, boomAngle: rig.boomAngle * rig.tackSign, tackSign: rig.tackSign, time: t });
   hud.el.mark.textContent = state.finished ? 'Complete' : state.marks[state.currentMark].name;
   hud.el.timer.textContent = state.raceStart === null ? '--:--' : fmtTime(state.raceTime);
+  hud.updateRival(courseRemaining(state.currentMark, boat.position), skipper.remaining(),
+    state.finished, skipper.finished);
 
   fpsAcc += rawMs / 1000; fpsCount++;
   if (fpsAcc > 0.5) {
@@ -4190,7 +4890,7 @@ function renderScene(dt, t) {
   sky.setShadowFocus(boat ? boat.position : new THREE.Vector3());
   sky.dome.position.copy(camera.position);
 
-  ocean.update(camera, wake);
+  ocean.update(camera, wake, rivalWake);
   ocean.renderAuxiliary(renderer, scene, camera, [ocean.mesh, sky.dome], {
     refraction: needsRefraction(),
     reflection: TIERS[perf.tier].reflScale > 0,
@@ -4212,6 +4912,7 @@ function renderScene(dt, t) {
 // handy for tuning from the console
 window.__leeward = { get scene() { return scene; }, get renderer() { return renderer; },
   get camera() { return camera; }, get ocean() { return ocean; }, get boat() { return boat; },
+  get rival() { return rival; }, get skipper() { return skipper; }, get input() { return input; },
   get sky() { return sky; }, get post() { return post; }, state, perf, TIERS,
   setTier: (n) => applyTier(n), THREE };
 

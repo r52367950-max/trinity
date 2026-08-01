@@ -17,6 +17,7 @@ export class Hud {
       status: document.getElementById('status'),
       mark: document.getElementById('mark'),
       timer: document.getElementById('timer'),
+      rivalGap: document.getElementById('rival-gap'),
       help: document.getElementById('help'),
       toast: document.getElementById('toast'),
       fps: document.getElementById('fps'),
@@ -43,6 +44,25 @@ export class Hud {
     this.el.toast.textContent = text;
     this.el.toast.classList.add('show');
     this._toastUntil = performance.now() / 1000 + seconds;
+  }
+
+  /**
+   * The gap to the rival, measured in distance still to sail rather than in
+   * separation — two boats on opposite tacks can be 300 m apart and dead level.
+   */
+  updateRival(playerLeft, rivalLeft, playerDone, rivalDone) {
+    const el = this.el.rivalGap;
+    if (!el) return;
+    if (playerDone || rivalDone) {
+      el.textContent = playerDone && !rivalDone ? 'WON' : !playerDone && rivalDone ? 'LOST' : 'FINISHED';
+      el.className = playerDone && !rivalDone ? 'ahead' : 'astern';
+      return;
+    }
+    const gap = rivalLeft - playerLeft;          // positive: the player is ahead
+    const m = Math.abs(gap);
+    const dist = m > 950 ? `${(m / 1000).toFixed(1)} km` : `${m.toFixed(0)} m`;
+    el.textContent = m < 12 ? 'LEVEL' : `${gap > 0 ? '+' : '−'}${dist}`;
+    el.className = m < 12 ? '' : gap > 0 ? 'ahead' : 'astern';
   }
 
   update(state) {

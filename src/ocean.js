@@ -18,8 +18,8 @@ import { SKY_SAMPLE_GLSL, CLOUD_GLSL } from './atmosphere.js';
  * subsurface scattering, and four separate sources of foam.
  */
 
-const RINGS = 224;
-const SEGMENTS = 288;
+const RINGS = 240;
+const SEGMENTS = 320;
 const R_MAX = 9500;
 const R_NEAR = 300;
 
@@ -111,9 +111,14 @@ export class Ocean {
       uNear: { value: 0.15 },
       uFar: { value: 30000 },
 
+      // two wake buffers: one per boat on the water
       uWake: { value: null },
       uWakeCenter: { value: new THREE.Vector2() },
       uWakeRegion: { value: 320 },
+      uWake2: { value: null },
+      uWakeCenter2: { value: new THREE.Vector2() },
+      uWakeRegion2: { value: 320 },
+      uWake2Valid: { value: 0 },
 
       uExtinction: { value: new THREE.Vector3(0.42, 0.115, 0.058) },
       uScatterColor: { value: new THREE.Color(0.045, 0.21, 0.235) },
@@ -123,6 +128,7 @@ export class Ocean {
       uRefractionValid: { value: 1.0 },
       uCloudReflections: { value: 1.0 },
       uDetailStrength: { value: 1.0 },
+      uMicroDetail: { value: 1.0 },
       uDebug: { value: 0 },
     };
 
@@ -210,10 +216,10 @@ export class Ocean {
       ${CLOUD_GLSL}
 
       uniform float uSunIntensity;
-      uniform sampler2D uWaterNormal, uFoamTex, uReflection, uRefraction, uDepthTex, uWake;
-      uniform vec2 uResolution, uWindDir, uWakeCenter;
-      uniform float uNear, uFar, uTime, uWindSpeed, uWakeRegion;
-      uniform float uFoamAmount, uCloudReflections, uDetailStrength;
+      uniform sampler2D uWaterNormal, uFoamTex, uReflection, uRefraction, uDepthTex, uWake, uWake2;
+      uniform vec2 uResolution, uWindDir, uWakeCenter, uWakeCenter2;
+      uniform float uNear, uFar, uTime, uWindSpeed, uWakeRegion, uWakeRegion2, uWake2Valid;
+      uniform float uFoamAmount, uCloudReflections, uDetailStrength, uMicroDetail;
       uniform float uPlanarStrength, uRefractionValid;
       uniform float uDebug;
       uniform vec3 uExtinction;
@@ -258,6 +264,17 @@ export class Ocean {
         float f4 = smoothstep(80.0, 280.0, dist);
 
         vec3 n = n1 * (1.0 - f4 * 0.45) + n2 * (0.72 * f2) + n3 * (0.46 * f3) + n4 * (0.85 * f4);
+
+        // A fifth band, for the couple of boat-lengths you can actually reach
+        // out and touch. Capillary ripple this fine is invisible past the
+        // foredeck, so it is the first thing the quality tiers drop.
+        if (uMicroDetail > 0.5) {
+          float f5 = 1.0 - smoothstep(5.0, 26.0, dist);
+          if (f5 > 0.002) {
+            n += unpackNormal(texture2D(uWaterNormal, p * 2.35 - perp * t * 0.088 + 0.13)) * (0.40 * f5);
+          }
+        }
+
         n.xz *= strength;
         n.y = max(n.y, 0.35);
         return normalize(n);
@@ -392,6 +409,11 @@ export class Ocean {
         vec2 wuv = (vWorld.xz - uWakeCenter) / uWakeRegion + 0.5;
         float inWake = step(0.0, wuv.x) * step(wuv.x, 1.0) * step(0.0, wuv.y) * step(wuv.y, 1.0);
         float wake = texture2D(uWake, clamp(wuv, 0.0, 1.0)).r * inWake;
+        if (uWake2Valid > 0.5) {
+          vec2 wuv2 = (vWorld.xz - uWakeCenter2) / uWakeRegion2 + 0.5;
+          float in2 = step(0.0, wuv2.x) * step(wuv2.x, 1.0) * step(0.0, wuv2.y) * step(wuv2.y, 1.0);
+          wake = max(wake, texture2D(uWake2, clamp(wuv2, 0.0, 1.0)).r * in2);
+        }
 
         float foam = clamp(crest * 0.85 + breaker + shore + wake * 1.15, 0.0, 1.0);
         foam = clamp(foam * (0.42 + 1.05 * bubbles), 0.0, 1.0) * uFoamAmount;
@@ -426,8 +448,8 @@ export class Ocean {
   setSize(width, height, auxScale = 0.55) {
     this.uniforms.uResolution.value.set(width, height);
     const scale = auxScale > 0 ? auxScale : 0.3;
-    const rw = Math.max(160, Math.min(1600, Math.floor(width * scale)));
-    const rh = Math.max(160, Math.min(1600, Math.floor(height * scale)));
+    const rw = Math.max(160, Math.min(2048, Math.floor(width * scale)));
+    const rh = Math.max(160, Math.min(2048, Math.floor(height * scale)));
     this.reflectionRT.setSize(rw, rh);
     this.refractionRT.setSize(rw, rh);
     this.refractionRT.depthTexture.image.width = rw;
@@ -505,12 +527,21 @@ export class Ocean {
     this.uniforms.uFar.value = camera.far;
   }
 
-  update(camera, wake) {
+  update(camera, wake, wake2) {
     this.uniforms.uCenter.value.set(camera.position.x, camera.position.z);
     if (wake) {
       this.uniforms.uWake.value = wake.texture;
       this.uniforms.uWakeCenter.value.copy(wake.center);
       this.uniforms.uWakeRegion.value = wake.region;
+    }
+    this.uniforms.uWake2Valid.value = wake2 ? 1 : 0;
+    if (wake2) {
+      this.uniforms.uWake2.value = wake2.texture;
+      this.uniforms.uWakeCenter2.value.copy(wake2.center);
+      this.uniforms.uWakeRegion2.value = wake2.region;
+    } else if (!this.uniforms.uWake2.value) {
+      // a sampler still has to be bound even when the branch never runs
+      this.uniforms.uWake2.value = wake ? wake.texture : null;
     }
   }
 }

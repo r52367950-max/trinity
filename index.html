@@ -84,6 +84,13 @@
   #mark { font-size: 15px; font-weight: 400; }
   #timer { font-family: var(--data); font-size: 21px; font-weight: 400; font-variant-numeric: tabular-nums;
     margin-top: 4px; letter-spacing: 0.01em; }
+  #rival { display: flex; justify-content: space-between; align-items: baseline; gap: 14px;
+    margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--edge);
+    font-size: 10px; letter-spacing: 0.18em; color: var(--dim); text-transform: uppercase; }
+  #rival-gap { font-family: var(--data); font-size: 12px; letter-spacing: 0.04em;
+    font-variant-numeric: tabular-nums; color: var(--ink); text-transform: none; }
+  #rival-gap.ahead { color: var(--chart); }
+  #rival-gap.astern { color: var(--signal); }
 
   /* ---- top right: keys ---- */
   #help { position: absolute; top: 22px; right: 22px; padding: 13px 16px; font-size: 11.5px; line-height: 1.85; color: var(--dim); }
@@ -144,6 +151,7 @@
     <h4>Course</h4>
     <div id="mark">—</div>
     <div id="timer">--:--</div>
+    <div id="rival"><span>vs Mistral</span><span id="rival-gap">—</span></div>
   </div>
 
   <div id="help" class="panel">
@@ -183,7 +191,7 @@
     <h1>LEEWARD</h1>
     <div class="sub">A first-person sailing game</div>
     <p class="desc">
-      风从右舷来。松开舵，让船借着涌浪滑向海湾里的小镇。<br>
+      风从右舷来。绕五个浮标一圈，和对手 <i>Mistral</i> 比一场。<br>
       Real apparent-wind sailing — you cannot point closer than 40° to the breeze.<br>
       <span style="opacity:.62;font-size:12.5px">A / D 舵 · W / S 帆 · 鼠标拖动转头 · C 切视角 · F 画质</span>
     </p>
