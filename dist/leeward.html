@@ -152,6 +152,7 @@
     <div><kbd>W</kbd><kbd>S</kbd> <b>收帆 / 放帆</b></div>
     <div><kbd>T</kbd> <b>自动调帆</b> · <kbd>V</kbd> <b>换船</b></div>
     <div><kbd>G</kbd> <b>召唤水滴</b> · <kbd>Q</kbd><kbd>E</kbd> <b>升降</b></div>
+    <div><kbd>Shift</kbd>+<kbd>A</kbd><kbd>D</kbd> <b>直角转弯</b></div>
     <div><kbd>Space</kbd> <b>回正舵 / 空挡 / 急停</b></div>
     <div><kbd>C</kbd> <b>视角</b> · 滚轮 <b>拉近拉远</b> · <kbd>H</kbd> <b>隐藏</b></div>
     <div><kbd>[</kbd><kbd>]</kbd> <b>时间</b> · <kbd>-</kbd><kbd>=</kbd> <b>风力</b></div>
@@ -303,6 +304,10 @@ function angleDelta(a, b) {
 function damp(current, target, lambda, dt) {
   return lerp(current, target, 1 - Math.exp(-lambda * dt));
 }
+/** The same, but taking the short way round the circle. */
+function dampAngle(current, target, lambda, dt) {
+  return current + angleDelta(current, target) * (1 - Math.exp(-lambda * dt));
+}
 
 /**
  * Minimal geometry merger (BufferGeometryUtils is an addon we do not ship).
@@ -364,7 +369,7 @@ function trs(px, py, pz, rx = 0, ry = 0, rz = 0, sx = 1, sy = 1, sz = 1) {
   return _m.clone().compose(_v, _q, _s);
 }
 
-return {makeRng,clamp,lerp,smoothstep,angleDelta,damp,mergeGeometries,prepare,trs};
+return {makeRng,clamp,lerp,smoothstep,angleDelta,damp,dampAngle,mergeGeometries,prepare,trs};
 })();
 
 const __m_noise = (function () {
@@ -4641,7 +4646,7 @@ const THREE = __THREE;
 const {shared,KNOTS} = __m_shared;
 const {SKY_SAMPLE_GLSL,CLOUD_GLSL} = __m_atmosphere;
 const {sampleOcean} = __m_waves;
-const {clamp,damp,makeRng} = __m_utils;
+const {clamp,damp,dampAngle,angleDelta,makeRng} = __m_utils;
 
 /**
  * The probe.
@@ -4666,7 +4671,21 @@ const MAX_ASTERN = 96;      // about 187 knots
 const ACCEL = 190;          // m/s^2; it reaches cruise in under a second
 const BRAKE = 950;          // and sheds it in a sixth of one
 const COAST = 15;           // what it gives back when you ask for nothing
-const TURN_RATE = 13.0;     // rad/s at full deflection — a corner, not a circle
+const TURN_RATE = 13.0;     // rad/s at full deflection — a very tight arc
+/**
+ * And with Shift, the thing it is famous for.
+ *
+ * 55 rad/s puts the turn radius at 2.7 m at three hundred knots — under one
+ * hull length, and a fifth of the width of its own trench, which is the test
+ * that matters: a corner is only a corner if it is sharper than the mark it
+ * leaves. The ordinary held turn is 18 m, about equal to the trench's own half
+ * width, and that comes out as a hairpin however tight it looks in the numbers.
+ *
+ * It is driven off the raw key rather than the ramped helm, because a hundred
+ * and fifty milliseconds of soft entry is exactly the thing that rounds a kink
+ * off into an arc.
+ */
+const TURN_SNAP = 55.0;
 const HOVER_MIN = 1.2;
 const HOVER_MAX = 900;
 
@@ -4998,6 +5017,8 @@ class Droplet {
     this.altitude = 8;           // metres above the local sea surface
     this.charge = 0;
     this.aura = 0;               // the idle halo, up when it is holding still
+    this.turnRate = 0;           // rad/s actually applied, for the readout
+    this.viewHeading = this.heading;
     this.active = false;         // summoned and under control
     this.arriving = 0;
     this.stopFlash = 0;
@@ -5037,6 +5058,11 @@ class Droplet {
   get starboard() { return _ds.set(Math.cos(this.heading), 0, -Math.sin(this.heading)); }
   get speed() { return Math.abs(this.surge); }
   get knots() { return this.surge * KNOTS; }
+  /** Instantaneous turn radius in metres — the only honest way to see whether
+   *  a corner is a corner. Infinity when it is running straight. */
+  get turnRadius() {
+    return this.turnRate > 1e-3 ? Math.abs(this.surge) / this.turnRate : Infinity;
+  }
 
   /** Called it down out of the sky. It arrives the only way it knows how. */
   summon(nearPos, nearHeading) {
@@ -5062,14 +5088,21 @@ class Droplet {
       return;
     }
 
+    if (!input) this.turnRate = 0;
     if (input) {
       // Heading slews at a rate that has nothing to do with speed, which is
       // what produces the corner instead of a turn.
-      // Held down at speed this puts the turn radius inside twenty metres,
-      // which on a three-metre object is not a turn at all — it is a corner.
-      // Eased off near rest only so that aiming it by hand is possible.
-      const rate = TURN_RATE * (0.24 + 0.76 * Math.min(1, Math.abs(this.surge) / 40));
-      this.heading -= input.rudder * rate * dt;
+      // Held: a very tight arc, eased off near rest so aiming it by hand is
+      // possible. Shift: the corner.
+      let turn;
+      if (input.hard && input.steerRaw !== 0) {
+        turn = -input.steerRaw * TURN_SNAP * dt;
+      } else {
+        const rate = TURN_RATE * (0.24 + 0.76 * Math.min(1, Math.abs(this.surge) / 40));
+        turn = -input.rudder * rate * dt;
+      }
+      this.heading += turn;
+      this.turnRate = dt > 1e-5 ? Math.abs(turn) / dt : 0;
       // Hold to accelerate, let go and it winds down. Stopping is not the same
       // problem as starting for a thing whose momentum is not its own: the
       // brake is five times the accelerator, so S kills three hundred knots in
@@ -5129,6 +5162,13 @@ class Droplet {
     this.root.visible = this.active;
     if (!this.active) return;
 
+    // The camera keeps its own heading, a quarter second behind the real one.
+    // This is the whole trick for keeping an instantaneous corner drivable:
+    // the *world* turn is one frame, so the trench takes a genuine kink, but
+    // the picture swings round at a speed a person can read. Snap both and it
+    // is unusable; smooth both and it is not a corner any more.
+    this.viewHeading = dampAngle(this.viewHeading, this.heading, 9, dt);
+
     // The nose tips into the direction of travel — not because drag says so,
     // but because it is aimed, and aiming is the only thing it ever does.
     const aim = clamp(this.surge / MAX_AHEAD, -1, 1) * 0.09;
@@ -5171,10 +5211,19 @@ class Droplet {
     const radius = (1.7 + Math.min(h, 24) * 0.34) *
       (1 + clamp(Math.abs(this.surge) / MAX_AHEAD, 0, 1) * 1.35);
 
+    // A node every so many metres — *and* one whenever the heading has moved
+    // appreciably, or a corner taken in two frames falls between samples and
+    // gets chorded straight back off again.
+    // node 1 is (x, z, strength, radius) at offsets 4, 5, 6, 7 — reading 6 for
+    // its z compares a position against a strength, and the test then passes
+    // every single frame, which quietly shortened the whole trail to a couple
+    // of node spacings
     const dx = this.position.x - p[4];
-    const dz = this.position.z - p[6];
-    if (this.active && dx * dx + dz * dz > PATH_SPACING * PATH_SPACING) {
+    const dz = this.position.z - p[5];
+    const turned = Math.abs(angleDelta(this._nodeHeading ?? this.heading, this.heading)) > 0.22;
+    if (this.active && (dx * dx + dz * dz > PATH_SPACING * PATH_SPACING || turned)) {
       p.copyWithin(4, 0, (PATH_N - 1) * 4);      // everything ages one slot
+      this._nodeHeading = this.heading;
     }
     p[0] = this.position.x;
     p[1] = this.position.z;
@@ -5824,14 +5873,18 @@ class Hud {
    */
   updateDroplet(state) {
     const { droplet, time } = state;
-    this.setLabels('HDG', 'ALT', 'MODE', 'Thrust');
+    this.setLabels('HDG', 'ALT', 'TURN', 'Thrust');
 
     const kn = droplet.knots;
     this.el.speed.textContent = Math.abs(kn) < 100 ? kn.toFixed(1) : kn.toFixed(0);
     const hdg = ((droplet.heading * 180) / Math.PI + 360) % 360;
     this.el.heading.textContent = hdg.toFixed(0).padStart(3, '0') + '°';
     this.el.wind.textContent = `${droplet.altitude < 100 ? droplet.altitude.toFixed(1) : droplet.altitude.toFixed(0)} m`;
+    // Turn radius, which is the only honest way to see whether a corner is a
+    // corner: under a hull length and it is a kink, several and it is a bend.
+    const R = droplet.turnRadius;
     this.el.heelLabel.textContent = droplet.arriving > 0 ? 'ENTRY'
+      : R < 400 ? `R ${R < 10 ? R.toFixed(1) : R.toFixed(0)} m`
       : Math.abs(kn) < 0.5 ? 'HOLD' : kn < 0 ? 'ASTERN' : 'RUN';
 
     const frac = Math.round(Math.abs(droplet.charge) * 100);
@@ -6082,6 +6135,8 @@ class Input {
     this.trim = 0;
     this.neutral = false;
     this.climb = 0;
+    this.hard = false;
+    this.steerRaw = 0;
     this.locked = false;
     this.touchSteer = 0;
     this.sensitivity = 0.0022;
@@ -6193,7 +6248,10 @@ class Input {
   update(dt) {
     const steer = (this.down('KeyD', 'ArrowRight') ? 1 : 0) - (this.down('KeyA', 'ArrowLeft') ? 1 : 0)
       + this.touchSteer;
-    const target = Math.max(-1, Math.min(1, steer)) * (this.down('ShiftLeft', 'ShiftRight') ? 1 : 0.62);
+    this.hard = this.down('ShiftLeft', 'ShiftRight');
+    // the un-ramped axis, for anything that must not have a soft entry
+    this.steerRaw = Math.max(-1, Math.min(1, steer));
+    const target = this.steerRaw * (this.hard ? 1 : 0.62);
     this.rudder += (target - this.rudder) * Math.min(1, dt * 7);
     if (steer === 0) this.rudder *= Math.max(0, 1 - dt * 4.5);
     // A tap has to survive a slow frame: at a few fps the key is up again
@@ -6503,7 +6561,9 @@ function updateCamera(dt) {
     // eighty — it simply never caught up. Anchoring the offset to the vessel
     // means it cannot fall behind at any speed, and the only smoothing left is
     // on the aim point.
-    const a = v.heading + Math.PI + input.lookYaw;
+    // viewHeading, where a craft keeps one: the probe's corners are one frame
+    // in the world and a quarter second in the picture
+    const a = (v.viewHeading ?? v.heading) + Math.PI + input.lookYaw;
     const p = clamp(input.lookPitch + 0.16, -1.15, 1.30);
     const d = state.orbitDist;
     const flat = Math.cos(p) * d;
@@ -6541,7 +6601,8 @@ function updateCamera(dt) {
   // orientation is the hull turned through half a circle. Conjugating by that
   // half turn is what flips the signs on pitch and roll here.
   // A helmsman braces against the heel: the horizon tips, but less than the deck.
-  eBoat.set(-v.pitch * 0.55, v.heading + Math.PI, (v.heel + v.waveRoll) * 0.52);
+  eBoat.set(-v.pitch * 0.55, (v.viewHeading ?? v.heading) + Math.PI,
+    (v.heel + v.waveRoll) * 0.52);
   qBoat.setFromEuler(eBoat);
   qYaw.setFromAxisAngle(UP, input.lookYaw);
   qPitch.setFromAxisAngle(RIGHT, input.lookPitch);

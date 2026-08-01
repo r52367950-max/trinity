@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { shared, KNOTS } from './shared.js';
 import { SKY_SAMPLE_GLSL, CLOUD_GLSL } from './atmosphere.js';
 import { sampleOcean } from './waves.js';
-import { clamp, damp, makeRng } from './utils.js';
+import { clamp, damp, dampAngle, angleDelta, makeRng } from './utils.js';
 
 /**
  * The probe.
@@ -27,7 +27,21 @@ const MAX_ASTERN = 96;      // about 187 knots
 const ACCEL = 190;          // m/s^2; it reaches cruise in under a second
 const BRAKE = 950;          // and sheds it in a sixth of one
 const COAST = 15;           // what it gives back when you ask for nothing
-const TURN_RATE = 13.0;     // rad/s at full deflection — a corner, not a circle
+const TURN_RATE = 13.0;     // rad/s at full deflection — a very tight arc
+/**
+ * And with Shift, the thing it is famous for.
+ *
+ * 55 rad/s puts the turn radius at 2.7 m at three hundred knots — under one
+ * hull length, and a fifth of the width of its own trench, which is the test
+ * that matters: a corner is only a corner if it is sharper than the mark it
+ * leaves. The ordinary held turn is 18 m, about equal to the trench's own half
+ * width, and that comes out as a hairpin however tight it looks in the numbers.
+ *
+ * It is driven off the raw key rather than the ramped helm, because a hundred
+ * and fifty milliseconds of soft entry is exactly the thing that rounds a kink
+ * off into an arc.
+ */
+const TURN_SNAP = 55.0;
 const HOVER_MIN = 1.2;
 const HOVER_MAX = 900;
 
@@ -359,6 +373,8 @@ export class Droplet {
     this.altitude = 8;           // metres above the local sea surface
     this.charge = 0;
     this.aura = 0;               // the idle halo, up when it is holding still
+    this.turnRate = 0;           // rad/s actually applied, for the readout
+    this.viewHeading = this.heading;
     this.active = false;         // summoned and under control
     this.arriving = 0;
     this.stopFlash = 0;
@@ -398,6 +414,11 @@ export class Droplet {
   get starboard() { return _ds.set(Math.cos(this.heading), 0, -Math.sin(this.heading)); }
   get speed() { return Math.abs(this.surge); }
   get knots() { return this.surge * KNOTS; }
+  /** Instantaneous turn radius in metres — the only honest way to see whether
+   *  a corner is a corner. Infinity when it is running straight. */
+  get turnRadius() {
+    return this.turnRate > 1e-3 ? Math.abs(this.surge) / this.turnRate : Infinity;
+  }
 
   /** Called it down out of the sky. It arrives the only way it knows how. */
   summon(nearPos, nearHeading) {
@@ -423,14 +444,21 @@ export class Droplet {
       return;
     }
 
+    if (!input) this.turnRate = 0;
     if (input) {
       // Heading slews at a rate that has nothing to do with speed, which is
       // what produces the corner instead of a turn.
-      // Held down at speed this puts the turn radius inside twenty metres,
-      // which on a three-metre object is not a turn at all — it is a corner.
-      // Eased off near rest only so that aiming it by hand is possible.
-      const rate = TURN_RATE * (0.24 + 0.76 * Math.min(1, Math.abs(this.surge) / 40));
-      this.heading -= input.rudder * rate * dt;
+      // Held: a very tight arc, eased off near rest so aiming it by hand is
+      // possible. Shift: the corner.
+      let turn;
+      if (input.hard && input.steerRaw !== 0) {
+        turn = -input.steerRaw * TURN_SNAP * dt;
+      } else {
+        const rate = TURN_RATE * (0.24 + 0.76 * Math.min(1, Math.abs(this.surge) / 40));
+        turn = -input.rudder * rate * dt;
+      }
+      this.heading += turn;
+      this.turnRate = dt > 1e-5 ? Math.abs(turn) / dt : 0;
       // Hold to accelerate, let go and it winds down. Stopping is not the same
       // problem as starting for a thing whose momentum is not its own: the
       // brake is five times the accelerator, so S kills three hundred knots in
@@ -490,6 +518,13 @@ export class Droplet {
     this.root.visible = this.active;
     if (!this.active) return;
 
+    // The camera keeps its own heading, a quarter second behind the real one.
+    // This is the whole trick for keeping an instantaneous corner drivable:
+    // the *world* turn is one frame, so the trench takes a genuine kink, but
+    // the picture swings round at a speed a person can read. Snap both and it
+    // is unusable; smooth both and it is not a corner any more.
+    this.viewHeading = dampAngle(this.viewHeading, this.heading, 9, dt);
+
     // The nose tips into the direction of travel — not because drag says so,
     // but because it is aimed, and aiming is the only thing it ever does.
     const aim = clamp(this.surge / MAX_AHEAD, -1, 1) * 0.09;
@@ -532,10 +567,19 @@ export class Droplet {
     const radius = (1.7 + Math.min(h, 24) * 0.34) *
       (1 + clamp(Math.abs(this.surge) / MAX_AHEAD, 0, 1) * 1.35);
 
+    // A node every so many metres — *and* one whenever the heading has moved
+    // appreciably, or a corner taken in two frames falls between samples and
+    // gets chorded straight back off again.
+    // node 1 is (x, z, strength, radius) at offsets 4, 5, 6, 7 — reading 6 for
+    // its z compares a position against a strength, and the test then passes
+    // every single frame, which quietly shortened the whole trail to a couple
+    // of node spacings
     const dx = this.position.x - p[4];
-    const dz = this.position.z - p[6];
-    if (this.active && dx * dx + dz * dz > PATH_SPACING * PATH_SPACING) {
+    const dz = this.position.z - p[5];
+    const turned = Math.abs(angleDelta(this._nodeHeading ?? this.heading, this.heading)) > 0.22;
+    if (this.active && (dx * dx + dz * dz > PATH_SPACING * PATH_SPACING || turned)) {
       p.copyWithin(4, 0, (PATH_N - 1) * 4);      // everything ages one slot
+      this._nodeHeading = this.heading;
     }
     p[0] = this.position.x;
     p[1] = this.position.z;

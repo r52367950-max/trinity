@@ -290,7 +290,9 @@ function updateCamera(dt) {
     // eighty — it simply never caught up. Anchoring the offset to the vessel
     // means it cannot fall behind at any speed, and the only smoothing left is
     // on the aim point.
-    const a = v.heading + Math.PI + input.lookYaw;
+    // viewHeading, where a craft keeps one: the probe's corners are one frame
+    // in the world and a quarter second in the picture
+    const a = (v.viewHeading ?? v.heading) + Math.PI + input.lookYaw;
     const p = clamp(input.lookPitch + 0.16, -1.15, 1.30);
     const d = state.orbitDist;
     const flat = Math.cos(p) * d;
@@ -328,7 +330,8 @@ function updateCamera(dt) {
   // orientation is the hull turned through half a circle. Conjugating by that
   // half turn is what flips the signs on pitch and roll here.
   // A helmsman braces against the heel: the horizon tips, but less than the deck.
-  eBoat.set(-v.pitch * 0.55, v.heading + Math.PI, (v.heel + v.waveRoll) * 0.52);
+  eBoat.set(-v.pitch * 0.55, (v.viewHeading ?? v.heading) + Math.PI,
+    (v.heel + v.waveRoll) * 0.52);
   qBoat.setFromEuler(eBoat);
   qYaw.setFromAxisAngle(UP, input.lookYaw);
   qPitch.setFromAxisAngle(RIGHT, input.lookPitch);

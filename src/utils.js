@@ -29,6 +29,10 @@ export function angleDelta(a, b) {
 export function damp(current, target, lambda, dt) {
   return lerp(current, target, 1 - Math.exp(-lambda * dt));
 }
+/** The same, but taking the short way round the circle. */
+export function dampAngle(current, target, lambda, dt) {
+  return current + angleDelta(current, target) * (1 - Math.exp(-lambda * dt));
+}
 
 /**
  * Minimal geometry merger (BufferGeometryUtils is an addon we do not ship).

@@ -19,6 +19,8 @@ export class Input {
     this.trim = 0;
     this.neutral = false;
     this.climb = 0;
+    this.hard = false;
+    this.steerRaw = 0;
     this.locked = false;
     this.touchSteer = 0;
     this.sensitivity = 0.0022;
@@ -130,7 +132,10 @@ export class Input {
   update(dt) {
     const steer = (this.down('KeyD', 'ArrowRight') ? 1 : 0) - (this.down('KeyA', 'ArrowLeft') ? 1 : 0)
       + this.touchSteer;
-    const target = Math.max(-1, Math.min(1, steer)) * (this.down('ShiftLeft', 'ShiftRight') ? 1 : 0.62);
+    this.hard = this.down('ShiftLeft', 'ShiftRight');
+    // the un-ramped axis, for anything that must not have a soft entry
+    this.steerRaw = Math.max(-1, Math.min(1, steer));
+    const target = this.steerRaw * (this.hard ? 1 : 0.62);
     this.rudder += (target - this.rudder) * Math.min(1, dt * 7);
     if (steer === 0) this.rudder *= Math.max(0, 1 - dt * 4.5);
     // A tap has to survive a slow frame: at a few fps the key is up again

@@ -161,14 +161,18 @@ export class Hud {
    */
   updateDroplet(state) {
     const { droplet, time } = state;
-    this.setLabels('HDG', 'ALT', 'MODE', 'Thrust');
+    this.setLabels('HDG', 'ALT', 'TURN', 'Thrust');
 
     const kn = droplet.knots;
     this.el.speed.textContent = Math.abs(kn) < 100 ? kn.toFixed(1) : kn.toFixed(0);
     const hdg = ((droplet.heading * 180) / Math.PI + 360) % 360;
     this.el.heading.textContent = hdg.toFixed(0).padStart(3, '0') + '°';
     this.el.wind.textContent = `${droplet.altitude < 100 ? droplet.altitude.toFixed(1) : droplet.altitude.toFixed(0)} m`;
+    // Turn radius, which is the only honest way to see whether a corner is a
+    // corner: under a hull length and it is a kink, several and it is a bend.
+    const R = droplet.turnRadius;
     this.el.heelLabel.textContent = droplet.arriving > 0 ? 'ENTRY'
+      : R < 400 ? `R ${R < 10 ? R.toFixed(1) : R.toFixed(0)} m`
       : Math.abs(kn) < 0.5 ? 'HOLD' : kn < 0 ? 'ASTERN' : 'RUN';
 
     const frac = Math.round(Math.abs(droplet.charge) * 100);

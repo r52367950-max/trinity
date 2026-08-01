@@ -29,7 +29,7 @@ Needs a WebGL2 browser. Click the canvas to capture the mouse.
 
 | Key | |
 |---|---|
-| `A` / `D` | steer (hold `Shift` for hard over) |
+| `A` / `D` | steer (hold `Shift` for hard over — on the probe, an acute corner) |
 | `W` / `S` | sheet in / ease the mainsail — or throttle, in the powerboat |
 | `Space` | centre the rudder / back to neutral |
 | `V` | step across to whatever is alongside |
@@ -129,6 +129,41 @@ acute angle with a turn radius under twenty metres at full speed, which on a
 three-metre object is not a turn at all. That is not a shortcut: a thing that
 can do those four things is a thing whose momentum is not its own problem, and
 the way it moves is the only evidence of that you ever get.
+
+### The corner
+
+The turn is the thing it is famous for, so it is worth being able to check
+rather than take on trust. Two ways:
+
+- The **`TURN` field on the HUD** reads the live radius in metres.
+- The **trench keeps the record.** Swing the orbit camera round behind you, or
+  switch to fly-by, and look at what you left.
+
+Held helm at three hundred knots is a **17 m** radius — five hull lengths, and
+*wider than the trench's own half-width of 15 m*. That is the test that matters,
+and it fails it: a corner is only a corner if it is sharper than the mark it
+leaves, and at 17 m what you get is a hairpin, however tight the number sounds.
+
+**Shift + A/D** is the corner: **2.5 m**, which is 0.7 hull lengths and a sixth
+of the trench width. Measured by flying it at a fixed 20 ms step — a 126° change
+of heading in **two frames, 0.04 seconds**, with the track showing a clean V and
+no arc at all.
+
+Three things make that drivable rather than nauseating:
+
+- It runs off the **raw key**, not the ramped helm. A hundred and fifty
+  milliseconds of soft entry is precisely what rounds a kink into an arc.
+- The **camera keeps its own heading**, a quarter of a second behind the real
+  one. This is the whole trick: the world turn is one frame so the trench takes
+  a genuine kink, but the picture swings round at a speed a person can read.
+  Snap both and it is unusable; smooth both and it is not a corner any more.
+- Ordinary `A`/`D` is untouched, so all the fine aiming still behaves.
+
+The path recorder drops a node on heading change as well as on distance, or a
+corner taken in two frames falls between samples and gets chorded straight back
+off again.
+
+### Everything else about how it moves
 
 Stopping is not the same problem as starting for something like that, so the
 brake is five times the accelerator: `S` kills three hundred knots in about a
