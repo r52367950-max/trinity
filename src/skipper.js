@@ -101,10 +101,12 @@ export class Skipper {
     }
 
     // ---- helm --------------------------------------------------------------
-    let rudder = angleDelta(b.heading, this.course) * 1.9 - b.yawRate * 2.6;
+    // Helm to starboard takes the heading down, so the whole command is
+    // negated: this controller thinks in headings, the boat thinks in helm.
+    let rudder = -(angleDelta(b.heading, this.course) * 1.9 - b.yawRate * 2.6);
     // caught head to wind with no steerage: hold the helm over on the tack she
     // was last on until the bow falls off and the sails fill again
-    if (b.luffing > 0.6 && Math.abs(b.surge) < 0.55) rudder = this.tack;
+    if (b.luffing > 0.6 && Math.abs(b.surge) < 0.55) rudder = -this.tack;
     rudder += this.avoidBoat(b, other);
     this.control.rudder = clamp(rudder, -1, 1);
     this.control.trim = 0;
@@ -191,6 +193,6 @@ export class Skipper {
     if (d > 30 || d < 1e-3) return 0;
     const rel = angleDelta(b.heading, Math.atan2(dx, dz));
     if (Math.abs(rel) > 1.2) return 0;            // already past, or astern
-    return -Math.sign(rel || 1) * (1 - d / 30) * 0.85;
+    return Math.sign(rel || 1) * (1 - d / 30) * 0.85;
   }
 }

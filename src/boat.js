@@ -710,6 +710,13 @@ export class Boat {
   }
 
   get forward() { return _fwd.set(Math.sin(this.heading), 0, Math.cos(this.heading)); }
+  /**
+   * Careful: this is the boat's local +X, which in this scene points to *port*
+   * — forward is +Z and up is +Y, so forward x up lands on -X. The whole force
+   * decomposition is written in this basis and is self-consistent in it, so the
+   * name is the thing that is wrong, not the physics. Everywhere a real side
+   * has to be named or steered toward, the sign is flipped at that point.
+   */
   get starboard() { return _stb.set(Math.cos(this.heading), 0, -Math.sin(this.heading)); }
   get speed() { return Math.hypot(this.surge, this.sway); }
 
@@ -788,7 +795,9 @@ export class Boat {
     this.rudder = damp(this.rudder, clamp(input.rudder, -1, 1), 7, dt);
     const flow = Math.abs(u) + 0.4;
     const rudderLift = 0.5 * RHO_WATER * 0.42 * 4.6 * Math.sin(this.rudder * 0.62) * flow * flow;
-    let yawMoment = rudderLift * 3.6 * Math.sign(u || 1);
+    // negative, because increasing the heading swings the bow toward local +X,
+    // and local +X is port: helm to starboard has to take the heading down
+    let yawMoment = -rudderLift * 3.6 * Math.sign(u || 1);
     // weather helm: heeled hulls want to round up into the wind
     yawMoment += tackSign * Math.abs(this.heel) * 9000 * clamp(Math.abs(u) / 2, 0, 1);
     yawMoment += -this.yawRate * (26000 + 9000 * Math.abs(u));
@@ -904,8 +913,10 @@ export class Boat {
     bp.needsUpdate = true;
     this.burgeeGeo.computeVertexNormals();
 
-    this.tiller.rotation.y = -this.rudder * 0.5;
-    this.rudderMesh.rotation.y = this.rudder * 0.62;
+    // a tiller goes the opposite way to the turn, which is half of why they
+    // take getting used to
+    this.tiller.rotation.y = this.rudder * 0.5;
+    this.rudderMesh.rotation.y = -this.rudder * 0.62;
   }
 }
 

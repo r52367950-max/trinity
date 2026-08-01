@@ -8,6 +8,7 @@ import { buildTown, makeBirds } from './town.js';
 import { Ocean } from './ocean.js';
 import { Wake } from './wake.js';
 import { Boat, LIVERIES } from './boat.js';
+import { Powerboat } from './powerboat.js';
 import { Skipper } from './skipper.js';
 import { Post } from './post.js';
 import { Hud } from './hud.js';
@@ -37,6 +38,7 @@ const camera = new THREE.PerspectiveCamera(57, 2, 0.15, 30000);
 
 const state = {
   time: 0,
+  vessel: 'sail',      // which helm you are standing at: 'sail' or 'power'
   chase: false,
   // where the chase camera sits, in boat-relative polar coordinates
   chaseAngle: 2.6,
@@ -56,6 +58,8 @@ const state = {
 
 let sky, terrain, ocean, wake, boat, post, hud, input, town, birds;
 let rival, rivalWake, skipper;
+let power, powerWake, powerWakeIdle = 99;
+const mooring = { pos: new THREE.Vector3(0, 0, 0), heading: 0 };
 
 const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
 async function step(pct, label, fn) {
@@ -105,6 +109,7 @@ async function boot() {
     scene.add(ocean.mesh);
     wake = new Wake(renderer, { size: 512, region: 320 });
     rivalWake = new Wake(renderer, { size: 256, region: 260 });
+    powerWake = new Wake(renderer, { size: 384, region: 420 });
   });
 
   await step(96, 'Rigging the boat…', () => {
@@ -118,6 +123,14 @@ async function boot() {
     for (const b of [boat, rival]) b.setAnisotropy(aniso);
     buildCourse();
     skipper = new Skipper(rival, state.marks, { tack: -1 });
+
+    // Kingfisher lies alongside the jetty head, bow pointing out to sea, which
+    // is both where you would actually leave her and a reason to sail in.
+    const end = town.jettyEnd || new THREE.Vector2(0, 60);
+    const dir = town.jettyDir || new THREE.Vector2(0, 1);
+    mooring.heading = Math.atan2(dir.x, dir.y);
+    mooring.pos.set(end.x + dir.y * 5.6, 0, end.y - dir.x * 5.6);
+    power = new Powerboat(scene, { position: mooring.pos, heading: mooring.heading });
     post = new Post(renderer);
     hud = new Hud();
     input = new Input(canvas);
@@ -246,26 +259,30 @@ const chaseAim = new THREE.Vector3();
 const tmp = new THREE.Vector3();
 const heading2 = new THREE.Vector2();
 
+/** Whichever helm you are standing at. */
+function helmed() { return state.vessel === 'power' ? power : boat; }
+
 function updateCamera(dt) {
-  boat.root.updateMatrixWorld(true);
+  const v = helmed();
+  v.root.updateMatrixWorld(true);
 
   if (state.chase) {
-    const a = boat.heading + state.chaseAngle;
+    const a = v.heading + state.chaseAngle;
     const off = tmp.set(Math.sin(a) * state.chaseDist, state.chaseHeight, Math.cos(a) * state.chaseDist);
-    chasePos.lerp(off.add(boat.position), 1 - Math.exp(-dt * 2.6));
-    chaseAim.lerp(tmp.copy(boat.position).setY(boat.position.y + 3.4), 1 - Math.exp(-dt * 5));
+    chasePos.lerp(off.add(v.position), 1 - Math.exp(-dt * 2.6));
+    chaseAim.lerp(tmp.copy(v.position).setY(v.position.y + 3.4), 1 - Math.exp(-dt * 5));
     camera.position.copy(chasePos);
     camera.up.set(0, 1, 0);
     camera.lookAt(chaseAim);
     return;
   }
 
-  boat.helm.getWorldPosition(camera.position);
+  v.helm.getWorldPosition(camera.position);
   // The camera looks down its own -Z, the boat sails along +Z, so the base
   // orientation is the hull turned through half a circle. Conjugating by that
   // half turn is what flips the signs on pitch and roll here.
   // A helmsman braces against the heel: the horizon tips, but less than the deck.
-  eBoat.set(-boat.pitch * 0.55, boat.heading + Math.PI, (boat.heel + boat.waveRoll) * 0.52);
+  eBoat.set(-v.pitch * 0.55, v.heading + Math.PI, (v.heel + v.waveRoll) * 0.52);
   qBoat.setFromEuler(eBoat);
   qYaw.setFromAxisAngle(UP, input.lookYaw);
   qPitch.setFromAxisAngle(RIGHT, input.lookPitch);
@@ -411,10 +428,11 @@ function hotkeys() {
     state.chase = !state.chase;
     hud.toast(state.chase ? 'Chase camera' : 'At the helm');
   }
-  if (input.tapped('KeyT')) {
+  if (input.tapped('KeyT') && state.vessel === 'sail') {
     boat.autoTrim = !boat.autoTrim;
     hud.toast(boat.autoTrim ? 'Auto trim on' : 'Manual sheet — W / S');
   }
+  if (input.tapped('KeyV')) boardOther();
   if (input.tapped('KeyH')) document.getElementById('help').classList.toggle('hidden');
   if (input.tapped('KeyF')) {
     const i = (TIER_ORDER.indexOf(perf.tier) + 1) % TIER_ORDER.length;
@@ -432,6 +450,11 @@ function hotkeys() {
     skipper.mark = 0; skipper.finished = false; skipper.finishTime = null;
     skipper.tack = -1; skipper.sinceTack = 99;
     state.currentMark = 0; state.raceStart = null; state.raceTime = 0; state.finished = false;
+    state.vessel = 'sail';
+    power.position.copy(mooring.pos);
+    power.heading = mooring.heading;
+    power.surge = 0; power.sway = 0; power.yawRate = 0; power.roll = 0; power.rollRate = 0;
+    power.throttle = 0; power.steer = 0; power.battery = 1; power.moored = true;
     hud.toast('Back to the start');
   }
 }
@@ -441,6 +464,31 @@ function restart(b, x, z) {
   b.heading = Math.PI;
   b.surge = 0; b.sway = 0; b.yawRate = 0; b.heel = 0; b.heelRate = 0; b.rudder = 0;
 }
+
+/**
+ * Step across to the other boat, if she is alongside. Deliberately not a
+ * teleport: Kingfisher lies at the jetty, so getting to her is a short sail
+ * into the bay rather than a keystroke.
+ */
+const BOARDING_RANGE = 45;
+function boardOther() {
+  const from = helmed();
+  const to = from === boat ? power : boat;
+  const d = Math.hypot(from.position.x - to.position.x, from.position.z - to.position.z);
+  if (d > BOARDING_RANGE) {
+    hud.toast(`${to.name} 在 ${Math.round(d)} m 外 · ${to.name} is ${Math.round(d)} m off`, 3.2);
+    return;
+  }
+  state.vessel = state.vessel === 'sail' ? 'power' : 'sail';
+  input.lookYaw = 0;
+  input.lookPitch = -0.03;
+  hud.toast(state.vessel === 'power'
+    ? `${power.name} — W / S 油门 · A / D 转向`
+    : `${boat.name} — 回到舵柄`);
+}
+
+/** The helm of a boat nobody is standing at. */
+const UNATTENDED = { rudder: 0, trim: 0, neutral: false };
 
 let sunTimer = 0;
 function setSun(rate) {
@@ -477,6 +525,7 @@ function loop(now) {
     // keep the sea alive behind the title card
     boat.updateVisual(dt, state.time);
     rival.updateVisual(dt, state.time);
+    power.updateVisual(dt, state.time);
     updateCourse(dt);
     updateCamera(dt);
     birds(state.time);
@@ -495,7 +544,8 @@ function loop(now) {
   state.wind.speed = damp(state.wind.speed, state.wind.baseSpeed * (1 + gust * 0.16), 1.5, dt);
   state.wind.from = state.wind.baseFrom + shift;
 
-  if (input.trim !== 0) boat.autoTrim = false;
+  const atSail = state.vessel === 'sail';
+  if (atSail && input.trim !== 0) boat.autoTrim = false;
 
   // Fixed substeps: the rig, the heel spring and the rudder all need a short
   // timestep to stay stable, but clamping the frame delta instead would put
@@ -504,29 +554,47 @@ function loop(now) {
   const sub = dt / steps;
   let rig;
   const helm = skipper.update(dt, state.wind, t, boat);
+  // An unattended yacht is not a parked car: she keeps sailing with the helm
+  // centred, which means she will round up and lie luffing soon enough.
+  const sailInput = atSail ? input : UNATTENDED;
   for (let i = 0; i < steps; i++) {
     const st = t - dt + sub * (i + 1);
-    rig = boat.update(sub, input, state.wind, st);
+    rig = boat.update(sub, sailInput, state.wind, st);
     rival.update(sub, helm, state.wind, st);
+    power.update(sub, atSail ? null : input, st);
   }
 
   // Sails, buoyancy and pose are per-frame work: rebuilding them once per
   // substep is ten times the cost for an image nobody sees.
   boat.updateVisual(dt, t);
   rival.updateVisual(dt, t);
+  power.updateVisual(dt, t);
 
   heading2.set(Math.sin(boat.heading), Math.cos(boat.heading));
   wake.update(dt, boat.position, heading2, Math.abs(boat.surge), 9.5);
   heading2.set(Math.sin(rival.heading), Math.cos(rival.heading));
   rivalWake.update(dt, rival.position, heading2, Math.abs(rival.surge), 9.5);
+  // The powerboat's buffer only runs while there is something in it to see —
+  // she spends most of the game tied up, and a wake nobody made costs a
+  // render target switch every frame.
+  powerWakeIdle = power.speed > 0.25 ? 0 : powerWakeIdle + dt;
+  const powerTrail = powerWakeIdle < 30;
+  if (powerTrail) {
+    heading2.set(Math.sin(power.heading), Math.cos(power.heading));
+    powerWake.update(dt, power.position, heading2, power.speed * 1.35, 7.0);
+  }
 
   updateCourse(dt);
   updateCamera(dt);
   birds(t);
 
-  renderScene(dt, t);
+  renderScene(dt, t, powerTrail);
 
-  hud.update({ boat, wind: state.wind, boomAngle: rig.boomAngle * rig.tackSign, tackSign: rig.tackSign, time: t });
+  if (atSail) {
+    hud.update({ boat, wind: state.wind, boomAngle: rig.boomAngle * rig.tackSign, tackSign: rig.tackSign, time: t });
+  } else {
+    hud.updatePower({ power, wind: state.wind, time: t });
+  }
   hud.el.mark.textContent = state.finished ? 'Complete' : state.marks[state.currentMark].name;
   hud.el.timer.textContent = state.raceStart === null ? '--:--' : fmtTime(state.raceTime);
   hud.updateRival(courseRemaining(state.currentMark, boat.position), skipper.remaining(),
@@ -540,7 +608,7 @@ function loop(now) {
   }
 }
 
-function renderScene(dt, t) {
+function renderScene(dt, t, powerTrail = false) {
   // shared uniforms — one write, every shader sees it
   shared.uTime.value = t;
   shared.uCloudTime.value = t;
@@ -554,10 +622,10 @@ function renderScene(dt, t) {
   camera.updateMatrixWorld(true);
 
   if (sky.update(renderer, dt)) scene.environment = sky.environment;
-  sky.setShadowFocus(boat ? boat.position : new THREE.Vector3());
+  sky.setShadowFocus(boat ? helmed().position : new THREE.Vector3());
   sky.dome.position.copy(camera.position);
 
-  ocean.update(camera, wake, rivalWake);
+  ocean.update(camera, [wake, rivalWake, powerTrail ? powerWake : null]);
   ocean.renderAuxiliary(renderer, scene, camera, [ocean.mesh, sky.dome], {
     refraction: needsRefraction(),
     reflection: TIERS[perf.tier].reflScale > 0,
@@ -580,6 +648,7 @@ function renderScene(dt, t) {
 window.__leeward = { get scene() { return scene; }, get renderer() { return renderer; },
   get camera() { return camera; }, get ocean() { return ocean; }, get boat() { return boat; },
   get rival() { return rival; }, get skipper() { return skipper; }, get input() { return input; },
+  get power() { return power; }, get town() { return town; },
   get sky() { return sky; }, get post() { return post; }, state, perf, TIERS,
   setTier: (n) => applyTier(n), THREE };
 

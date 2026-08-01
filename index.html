@@ -60,6 +60,7 @@
     font-variant-numeric: tabular-nums; line-height: 1; }
   .unit { font-size: 11px; letter-spacing: 0.16em; color: var(--dim); text-transform: uppercase; }
   #subrow { display: flex; gap: 16px; margin-top: 10px; font-size: 11px; letter-spacing: 0.08em; color: var(--dim); }
+  #subrow i { font-style: normal; }
   #subrow b { font-family: var(--data); color: var(--ink); font-weight: 500; font-size: 12px;
     font-variant-numeric: tabular-nums; letter-spacing: 0; }
   #trimwrap { margin-top: 11px; }
@@ -157,8 +158,8 @@
   <div id="help" class="panel">
     <div><kbd>A</kbd><kbd>D</kbd> <b>舵 / steer</b></div>
     <div><kbd>W</kbd><kbd>S</kbd> <b>收帆 / 放帆</b></div>
-    <div><kbd>T</kbd> <b>自动调帆</b></div>
-    <div><kbd>Space</kbd> <b>回正舵</b></div>
+    <div><kbd>T</kbd> <b>自动调帆</b> · <kbd>V</kbd> <b>换船</b></div>
+    <div><kbd>Space</kbd> <b>回正舵 / 空挡</b></div>
     <div><kbd>C</kbd> <b>视角</b> · <kbd>H</kbd> <b>隐藏</b></div>
     <div><kbd>[</kbd><kbd>]</kbd> <b>时间</b> · <kbd>-</kbd><kbd>=</kbd> <b>风力</b></div>
     <div><kbd>F</kbd> <b>画质</b> · 鼠标拖动 <b>转头</b></div>
@@ -170,13 +171,13 @@
     <div id="readouts" class="panel">
       <div id="speedrow"><span id="speed">0.0</span><span class="unit">knots</span></div>
       <div id="subrow">
-        <span>HDG <b id="heading">000°</b></span>
-        <span>WIND <b id="wind">0 kn</b></span>
-        <span>HEEL <b id="heel-label">0°</b></span>
+        <span><i id="lbl-a">HDG</i> <b id="heading">000°</b></span>
+        <span><i id="lbl-b">WIND</i> <b id="wind">0 kn</b></span>
+        <span><i id="lbl-c">HEEL</i> <b id="heel-label">0°</b></span>
       </div>
       <div id="trimwrap">
         <div id="trimtrack"><div id="trim-bar"></div></div>
-        <div id="trimrow"><span>Sheet</span><span id="trim-label">AUTO</span></div>
+        <div id="trimrow"><span id="lbl-trim">Sheet</span><span id="trim-label">AUTO</span></div>
       </div>
     </div>
     <div id="dialwrap" class="panel"><canvas id="dial"></canvas></div>
@@ -193,7 +194,8 @@
     <p class="desc">
       风从右舷来。绕五个浮标一圈，和对手 <i>Mistral</i> 比一场。<br>
       Real apparent-wind sailing — you cannot point closer than 40° to the breeze.<br>
-      <span style="opacity:.62;font-size:12.5px">A / D 舵 · W / S 帆 · 鼠标拖动转头 · C 切视角 · F 画质</span>
+      港口栈桥上还系着一条电动快艇 Kingfisher，靠上去按 <b>V</b> 就能上船。<br>
+      <span style="opacity:.62;font-size:12.5px">A / D 舵 · W / S 帆或油门 · V 换船 · 鼠标拖动转头 · C 切视角 · F 画质</span>
     </p>
     <div id="bar"><i></i></div>
     <div id="loadlabel">Building the sea…</div>

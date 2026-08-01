@@ -111,7 +111,7 @@ export class Ocean {
       uNear: { value: 0.15 },
       uFar: { value: 30000 },
 
-      // two wake buffers: one per boat on the water
+      // one scrolling wake buffer per hull on the water
       uWake: { value: null },
       uWakeCenter: { value: new THREE.Vector2() },
       uWakeRegion: { value: 320 },
@@ -119,6 +119,10 @@ export class Ocean {
       uWakeCenter2: { value: new THREE.Vector2() },
       uWakeRegion2: { value: 320 },
       uWake2Valid: { value: 0 },
+      uWake3: { value: null },
+      uWakeCenter3: { value: new THREE.Vector2() },
+      uWakeRegion3: { value: 320 },
+      uWake3Valid: { value: 0 },
 
       uExtinction: { value: new THREE.Vector3(0.42, 0.115, 0.058) },
       uScatterColor: { value: new THREE.Color(0.045, 0.21, 0.235) },
@@ -216,9 +220,11 @@ export class Ocean {
       ${CLOUD_GLSL}
 
       uniform float uSunIntensity;
-      uniform sampler2D uWaterNormal, uFoamTex, uReflection, uRefraction, uDepthTex, uWake, uWake2;
-      uniform vec2 uResolution, uWindDir, uWakeCenter, uWakeCenter2;
-      uniform float uNear, uFar, uTime, uWindSpeed, uWakeRegion, uWakeRegion2, uWake2Valid;
+      uniform sampler2D uWaterNormal, uFoamTex, uReflection, uRefraction, uDepthTex;
+      uniform sampler2D uWake, uWake2, uWake3;
+      uniform vec2 uResolution, uWindDir, uWakeCenter, uWakeCenter2, uWakeCenter3;
+      uniform float uNear, uFar, uTime, uWindSpeed;
+      uniform float uWakeRegion, uWakeRegion2, uWakeRegion3, uWake2Valid, uWake3Valid;
       uniform float uFoamAmount, uCloudReflections, uDetailStrength, uMicroDetail;
       uniform float uPlanarStrength, uRefractionValid;
       uniform float uDebug;
@@ -278,6 +284,13 @@ export class Ocean {
         n.xz *= strength;
         n.y = max(n.y, 0.35);
         return normalize(n);
+      }
+
+      /** Foam from one hull's scrolling wake buffer, zero outside its square. */
+      float wakeAt(sampler2D tex, vec2 center, float region, vec2 world) {
+        vec2 uv = (world - center) / region + 0.5;
+        float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
+        return texture2D(tex, clamp(uv, 0.0, 1.0)).r * inside;
       }
 
       float ggx(float NoH, float rough) {
@@ -406,14 +419,9 @@ export class Ocean {
         float shore = smoothstep(3.6, 0.10, vWaterDepth) * (0.55 + 0.85 * wash);
         shore *= smoothstep(0.0, 0.22, vWaterDepth);
 
-        vec2 wuv = (vWorld.xz - uWakeCenter) / uWakeRegion + 0.5;
-        float inWake = step(0.0, wuv.x) * step(wuv.x, 1.0) * step(0.0, wuv.y) * step(wuv.y, 1.0);
-        float wake = texture2D(uWake, clamp(wuv, 0.0, 1.0)).r * inWake;
-        if (uWake2Valid > 0.5) {
-          vec2 wuv2 = (vWorld.xz - uWakeCenter2) / uWakeRegion2 + 0.5;
-          float in2 = step(0.0, wuv2.x) * step(wuv2.x, 1.0) * step(0.0, wuv2.y) * step(wuv2.y, 1.0);
-          wake = max(wake, texture2D(uWake2, clamp(wuv2, 0.0, 1.0)).r * in2);
-        }
+        float wake = wakeAt(uWake, uWakeCenter, uWakeRegion, vWorld.xz);
+        if (uWake2Valid > 0.5) wake = max(wake, wakeAt(uWake2, uWakeCenter2, uWakeRegion2, vWorld.xz));
+        if (uWake3Valid > 0.5) wake = max(wake, wakeAt(uWake3, uWakeCenter3, uWakeRegion3, vWorld.xz));
 
         float foam = clamp(crest * 0.85 + breaker + shore + wake * 1.15, 0.0, 1.0);
         foam = clamp(foam * (0.42 + 1.05 * bubbles), 0.0, 1.0) * uFoamAmount;
@@ -527,21 +535,27 @@ export class Ocean {
     this.uniforms.uFar.value = camera.far;
   }
 
-  update(camera, wake, wake2) {
+  /** `wakes` is one buffer per hull; the first is required, the rest optional. */
+  update(camera, wakes) {
     this.uniforms.uCenter.value.set(camera.position.x, camera.position.z);
-    if (wake) {
-      this.uniforms.uWake.value = wake.texture;
-      this.uniforms.uWakeCenter.value.copy(wake.center);
-      this.uniforms.uWakeRegion.value = wake.region;
-    }
-    this.uniforms.uWake2Valid.value = wake2 ? 1 : 0;
-    if (wake2) {
-      this.uniforms.uWake2.value = wake2.texture;
-      this.uniforms.uWakeCenter2.value.copy(wake2.center);
-      this.uniforms.uWakeRegion2.value = wake2.region;
-    } else if (!this.uniforms.uWake2.value) {
-      // a sampler still has to be bound even when the branch never runs
-      this.uniforms.uWake2.value = wake ? wake.texture : null;
+    const u = this.uniforms;
+    const slots = [
+      [u.uWake, u.uWakeCenter, u.uWakeRegion, null],
+      [u.uWake2, u.uWakeCenter2, u.uWakeRegion2, u.uWake2Valid],
+      [u.uWake3, u.uWakeCenter3, u.uWakeRegion3, u.uWake3Valid],
+    ];
+    for (let i = 0; i < slots.length; i++) {
+      const [tex, center, region, valid] = slots[i];
+      const w = wakes[i];
+      if (valid) valid.value = w ? 1 : 0;
+      if (w) {
+        tex.value = w.texture;
+        center.value.copy(w.center);
+        region.value = w.region;
+      } else if (!tex.value) {
+        // a sampler still has to be bound even when its branch never runs
+        tex.value = wakes[0] ? wakes[0].texture : null;
+      }
     }
   }
 }

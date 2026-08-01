@@ -4,7 +4,8 @@ A first-person sailing game. You stand at the tiller of a 9.5 metre sloop in a
 bay with a whitewashed town stacked up the hillside, and you sail — properly,
 against apparent wind, unable to point closer than about 40° to the breeze.
 *Mistral*, an AI-skippered rival, races you round the same five marks under the
-same physics.
+same physics. *Kingfisher*, an electric dayboat, lies at the jetty if you would
+rather have a throttle than an argument with the wind.
 
 Everything is generated at load time. There are no textures, no models and no
 assets on disk: the sea, the sky, the island, the town and the boat are all
@@ -29,8 +30,9 @@ Needs a WebGL2 browser. Click the canvas to capture the mouse.
 | Key | |
 |---|---|
 | `A` / `D` | steer (hold `Shift` for hard over) |
-| `W` / `S` | sheet in / ease the mainsail |
-| `Space` | centre the rudder |
+| `W` / `S` | sheet in / ease the mainsail — or throttle, in the powerboat |
+| `Space` | centre the rudder / back to neutral |
+| `V` | step across to the other boat, when she is alongside |
 | `T` | auto-trim on/off |
 | `C` | helm view / chase camera |
 | `[` `]` | move the sun |
@@ -58,6 +60,34 @@ velocity — which is what makes sailing feel like sailing:
 - A soft wall at hull speed (1.34·√LWL ≈ 7 knots) keeps her honest.
 
 Run aground and she stops and shoves off the shelf.
+
+## The powerboat
+
+*Kingfisher* is a 7 metre electric centre-console, moored at the jetty. Sail up
+to her and press `V` to step across; `V` again puts you back on the yacht. It is
+deliberately not a teleport — getting to her is a short sail into the bay, which
+is the only reason the harbour is worth visiting.
+
+She exists to be the opposite of the yacht. No trim, no apparent wind, no no-go
+zone: just a throttle. The physics that makes her interesting is the transition
+halfway up the rev range. Below about 11 knots she is pushing water aside and
+dragging a growing bow wave with her — the resistance hump — and she squats and
+noses up as she climbs it. Through it, the hull lifts onto its own bottom, the
+wetted area collapses, and drag *falls* while speed rises; she levels off and
+goes, to about 28 knots. Turning is thrust vectoring off the outboard rather
+than a rudder, so she steers on the throttle and leans **into** a turn, which is
+the one thing a keelboat can never do.
+
+The battery is the price: ten minutes flat out, less if you are heavy-handed,
+and it trickles back from the panels while she idles. Flat, she limps at a
+fifth of thrust rather than leaving you drifting.
+
+The hull is a hard-chine deep-V — deadrise falls from about 52° at the stem to
+19° at the transom, and the knuckle where bottom meets topside is not
+decoration: it is the edge the water separates from, and it is what makes a
+planing boat read as one. She has a real cockpit well rather than furniture on a
+lozenge: side decks, an inner liner, bulkheads fore and aft and a self-draining
+sole.
 
 ## The rival
 
@@ -116,7 +146,15 @@ they reflect in the water.
 the boat. Each frame it resamples itself at the new offset, blurs a little,
 fades a little, and the hull stamps in fresh turbulence — stern churn plus the
 two diverging arms of a Kelvin wake. The trail persists in world space for
-about half a minute.
+about half a minute. There is one buffer per hull; the powerboat's only runs
+while there is something in it to see, since she spends most of the game tied up.
+
+**A note on handedness.** Forward is +Z and up is +Y, so forward × up lands on
+−X: the boats' local +X points to *port*, not starboard. The force
+decomposition is written in that basis and is self-consistent in it, so the
+physics is right and only the name is wrong. Every place a real side has to be
+named or steered toward — the helm, the HUD's tack and heel labels, the dial,
+the navigation lights — flips the sign at that point, with a comment saying why.
 
 ## Performance
 
@@ -176,6 +214,7 @@ src/
   terrain.js        analytic island heightfield and its shader
   town.js           houses, harbour, lighthouse, trees, rocks, gulls
   boat.js           hull loft, deck gear, rig, sails, sailing physics
+  powerboat.js      hard-chine deep-V, planing physics, battery
   skipper.js        the rival's helmsman — VMG planner over candidate courses
   wake.js           persistent world-space foam buffer
   post.js           HDR, bloom, ACES, vignette, dither

@@ -17,6 +17,7 @@ export class Input {
     this.lookPitch = -0.03;
     this.rudder = 0;
     this.trim = 0;
+    this.neutral = false;
     this.locked = false;
     this.touchSteer = 0;
     this.sensitivity = 0.0022;
@@ -120,7 +121,8 @@ export class Input {
     const target = Math.max(-1, Math.min(1, steer)) * (this.down('ShiftLeft', 'ShiftRight') ? 1 : 0.62);
     this.rudder += (target - this.rudder) * Math.min(1, dt * 7);
     if (steer === 0) this.rudder *= Math.max(0, 1 - dt * 4.5);
-    if (this.down('Space')) this.rudder *= Math.max(0, 1 - dt * 12);
+    this.neutral = this.down('Space');
+    if (this.neutral) this.rudder *= Math.max(0, 1 - dt * 12);
 
     this.trim = (this.down('KeyS', 'ArrowDown') ? 1 : 0) - (this.down('KeyW', 'ArrowUp') ? 1 : 0);
   }

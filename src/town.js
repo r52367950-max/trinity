@@ -365,15 +365,18 @@ export function buildTown(scene) {
   const lightPos = lighthouse(parts, head.x, head.y);
 
   // --- wooden jetty running off the beach ---------------------------------
+  let jettyEnd = null, jettyDir = null;
   {
     const m = new THREE.Matrix4();
     const root = findShore(0.16, 1.2);
     const outward = new THREE.Vector2(root.x - ISLAND.center.x, root.y - ISLAND.center.y).normalize();
+    jettyDir = outward.clone();
     for (let i = 0; i < 18; i++) {
       const px = root.x + outward.x * i * 7.0;
       const pz = root.y + outward.y * i * 7.0;
       const bed = terrainHeight(px, pz);
       if (bed < -4.5) break;
+      jettyEnd = new THREE.Vector2(px, pz);
       const legH = 2.0 - bed;
       const perp = new THREE.Vector2(-outward.y, outward.x).multiplyScalar(2.2);
       for (const s of [-1, 1]) {
@@ -412,5 +415,5 @@ export function buildTown(scene) {
   makeRocks(group, applyAtmosphere);
 
   scene.add(group);
-  return { group, lightPos, pierPts };
+  return { group, lightPos, pierPts, jettyEnd, jettyDir };
 }

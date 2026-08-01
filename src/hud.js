@@ -1,4 +1,5 @@
 import { KNOTS } from './shared.js';
+import { clamp } from './utils.js';
 
 /**
  * Instruments. The dial is the important one: it shows the apparent wind
@@ -18,6 +19,10 @@ export class Hud {
       mark: document.getElementById('mark'),
       timer: document.getElementById('timer'),
       rivalGap: document.getElementById('rival-gap'),
+      lblA: document.getElementById('lbl-a'),
+      lblB: document.getElementById('lbl-b'),
+      lblC: document.getElementById('lbl-c'),
+      lblTrim: document.getElementById('lbl-trim'),
       help: document.getElementById('help'),
       toast: document.getElementById('toast'),
       fps: document.getElementById('fps'),
@@ -65,8 +70,36 @@ export class Hud {
     el.className = m < 12 ? '' : gap > 0 ? 'ahead' : 'astern';
   }
 
+  /**
+   * The three sub-readouts and the bar mean different things on each boat.
+   * Keyed on the whole set, not the first label — both faces start with HDG.
+   */
+  setLabels(a, b, c, trim) {
+    const key = a + b + c + trim;
+    if (this._labelKey === key) return;
+    this._labelKey = key;
+    this.el.lblA.textContent = a;
+    this.el.lblB.textContent = b;
+    this.el.lblC.textContent = c;
+    this.el.lblTrim.textContent = trim;
+  }
+
+  setStatus(text, kind) {
+    this.el.status.textContent = text;
+    this.el.status.className = kind;
+  }
+
+  /** Retire the toast once its time is up. */
+  _tick() {
+    if (this._toastUntil && performance.now() / 1000 > this._toastUntil) {
+      this.el.toast.classList.remove('show');
+      this._toastUntil = 0;
+    }
+  }
+
   update(state) {
     const { boat, wind, boomAngle, tackSign, time } = state;
+    this.setLabels('HDG', 'WIND', 'HEEL', 'Sheet');
 
     this.el.speed.textContent = (boat.surge * KNOTS).toFixed(1);
     const hdg = ((boat.heading * 180) / Math.PI + 360) % 360;
@@ -76,21 +109,109 @@ export class Hud {
     const trimPct = Math.round(boat.mainTrim * 100);
     this.el.trimBar.style.width = trimPct + '%';
     this.el.trimLabel.textContent = boat.autoTrim ? 'AUTO' : trimPct + '%';
-    this.el.heelLabel.textContent = `${Math.abs((boat.heel * 180) / Math.PI).toFixed(0)}° ${boat.heel > 0.01 ? 'STBD' : boat.heel < -0.01 ? 'PORT' : ''}`;
+    // positive heel lays the boat's local +X down, and local +X is port
+    this.el.heelLabel.textContent = `${Math.abs((boat.heel * 180) / Math.PI).toFixed(0)}° ${boat.heel > 0.01 ? 'PORT' : boat.heel < -0.01 ? 'STBD' : ''}`;
 
     let status = '';
     if (boat.aground > 0) status = 'AGROUND';
     else if (boat.luffing > 0.5) status = Math.abs(boat.apparent.angle) < 0.6 ? 'IN IRONS' : 'LUFFING';
     else if (boat.surge * KNOTS > 6.5) status = 'MAKING WAY';
-    this.el.status.textContent = status;
-    this.el.status.className = status === 'AGROUND' ? 'bad' : status === 'IN IRONS' || status === 'LUFFING' ? 'warn' : 'good';
+    this.setStatus(status, status === 'AGROUND' ? 'bad'
+      : status === 'IN IRONS' || status === 'LUFFING' ? 'warn' : 'good');
 
-    if (this._toastUntil && performance.now() / 1000 > this._toastUntil) {
-      this.el.toast.classList.remove('show');
-      this._toastUntil = 0;
+    this._tick();
+    this.drawDial(boat, wind, boomAngle, tackSign, time);
+  }
+
+  /**
+   * Kingfisher's face. Nothing about wind angle matters here, so the rose is
+   * replaced by the two numbers that do: how much throttle you are asking for,
+   * and how much battery is left to answer with.
+   */
+  updatePower(state) {
+    const { power, time } = state;
+    this.setLabels('HDG', 'BATT', 'DRIVE', 'Throttle');
+
+    this.el.speed.textContent = (power.surge * KNOTS).toFixed(1);
+    const hdg = ((power.heading * 180) / Math.PI + 360) % 360;
+    this.el.heading.textContent = hdg.toFixed(0).padStart(3, '0') + '°';
+    this.el.wind.textContent = `${Math.round(power.battery * 100)}%`;
+    this.el.heelLabel.textContent = power.planing > 0.55 ? 'PLANE' : power.planing > 0.1 ? 'LIFT' : 'DISPL';
+
+    const thr = Math.round(Math.abs(power.throttle) * 100);
+    this.el.trimBar.style.width = Math.min(100, thr) + '%';
+    this.el.trimLabel.textContent = power.throttle < -0.02 ? `AST ${thr}%` : `${thr}%`;
+
+    let status = '', kind = 'good';
+    if (power.aground > 0) { status = 'AGROUND'; kind = 'bad'; }
+    else if (power.battery <= 0.02) { status = 'BATTERY FLAT'; kind = 'bad'; }
+    else if (power.battery < 0.15) { status = 'BATTERY LOW'; kind = 'warn'; }
+    else if (power.planing > 0.85) status = 'ON THE PLANE';
+    else if (power.moored) status = 'MOORED';
+    this.setStatus(status, kind);
+
+    this._tick();
+    this.drawPowerDial(power);
+  }
+
+  drawPowerDial(power) {
+    const c = this.ctx;
+    const s = this.size;
+    const cx = s / 2, cy = s / 2, R = s / 2 - 14;
+    c.clearRect(0, 0, s, s);
+    c.save();
+    c.translate(cx, cy);
+
+    // 270 degrees of sweep, opening at the bottom
+    const A = (f) => Math.PI * 0.75 + clamp(f, 0, 1) * Math.PI * 1.5;
+    // throttle runs from full astern to full ahead, with neutral off-centre
+    const map = (x) => (x + 0.4) / 1.4;
+    const zero = map(0);
+
+    c.lineCap = 'butt';
+    c.lineWidth = 9;
+    c.strokeStyle = 'rgba(255,255,255,0.12)';
+    c.beginPath(); c.arc(0, 0, R, A(0), A(1)); c.stroke();
+
+    const t = map(power.throttle);
+    if (Math.abs(power.throttle) > 0.005) {
+      c.strokeStyle = power.throttle < 0 ? '#e4a34a' : '#8fe0b0';
+      c.beginPath();
+      c.arc(0, 0, R, Math.min(A(zero), A(t)), Math.max(A(zero), A(t)));
+      c.stroke();
     }
 
-    this.drawDial(boat, wind, boomAngle, tackSign, time);
+    // neutral detent
+    c.strokeStyle = 'rgba(255,255,255,0.55)';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.moveTo(Math.cos(A(zero)) * (R - 8), Math.sin(A(zero)) * (R - 8));
+    c.lineTo(Math.cos(A(zero)) * (R + 6), Math.sin(A(zero)) * (R + 6));
+    c.stroke();
+
+    // battery ring inside
+    const b = power.battery;
+    c.lineWidth = 5;
+    c.strokeStyle = 'rgba(255,255,255,0.10)';
+    c.beginPath(); c.arc(0, 0, R - 15, A(0), A(1)); c.stroke();
+    c.strokeStyle = b < 0.15 ? '#ee6a58' : b < 0.35 ? '#f0b45c' : '#63d6a4';
+    c.beginPath(); c.arc(0, 0, R - 15, A(0), A(b)); c.stroke();
+
+    // needle
+    c.strokeStyle = '#eef3f7';
+    c.lineWidth = 2.5;
+    c.beginPath();
+    c.moveTo(Math.cos(A(t)) * (R - 26), Math.sin(A(t)) * (R - 26));
+    c.lineTo(Math.cos(A(t)) * (R - 4), Math.sin(A(t)) * (R - 4));
+    c.stroke();
+
+    c.fillStyle = 'rgba(255,255,255,0.7)';
+    c.font = '600 10px ui-monospace, monospace';
+    c.textAlign = 'center';
+    c.fillText('THROTTLE', 0, -R + 26);
+    c.fillStyle = b < 0.15 ? '#ee6a58' : 'rgba(255,255,255,0.7)';
+    c.fillText(`BATT ${Math.round(b * 100)}%`, 0, R - 6);
+    c.restore();
   }
 
   drawDial(boat, wind, boomAngle, tackSign) {
@@ -138,18 +259,18 @@ export class Hud {
     c.quadraticCurveTo(-R * 0.19, -R * 0.1, 0, -R * 0.62);
     c.fill();
 
-    // boom
+    // Boom. The dial is a plan view with the bow up, so screen-right is
+    // starboard — the opposite of the hull's local +X, hence the sign.
     c.strokeStyle = boat.luffing > 0.5 ? '#e4a34a' : '#8fe0b0';
     c.lineWidth = 3;
     c.beginPath();
     c.moveTo(0, -R * 0.12);
-    c.lineTo(-Math.sin(boomAngle) * R * 0.5, -R * 0.12 + Math.cos(boomAngle) * R * 0.5);
+    c.lineTo(Math.sin(boomAngle) * R * 0.5, -R * 0.12 + Math.cos(boomAngle) * R * 0.5);
     c.stroke();
 
     // apparent wind arrow, pointing the way the wind is blowing
-    const wa = beta;
     c.save();
-    c.rotate(wa);
+    c.rotate(-beta);
     c.strokeStyle = '#7ec8ff';
     c.fillStyle = '#7ec8ff';
     c.lineWidth = 2.5;
@@ -170,7 +291,7 @@ export class Hud {
     c.fillStyle = 'rgba(255,255,255,0.7)';
     c.font = '600 10px ui-monospace, monospace';
     c.textAlign = 'center';
-    c.fillText(`AWA ${Math.abs((beta * 180) / Math.PI).toFixed(0)}° ${beta >= 0 ? 'S' : 'P'}`, cx, s - 2);
+    c.fillText(`AWA ${Math.abs((beta * 180) / Math.PI).toFixed(0)}° ${beta >= 0 ? 'P' : 'S'}`, cx, s - 2);
     c.fillText(`${(boat.apparent.speed * KNOTS).toFixed(0)} kn`, cx, 12);
   }
 }
